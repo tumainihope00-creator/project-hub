@@ -1,0 +1,845 @@
+// Project Hub 2.0 - Database schema
+// Provider: PostgreSQL (portable to SQLite by swapping provider + removing enums if needed)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum LifecycleStage {
+  IDEA
+  RESEARCH
+  PLANNING
+  ARCHITECTURE
+  BUILDING
+  TESTING
+  DEPLOYMENT
+  PRODUCTION
+  MAINTENANCE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+  ABANDONED
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  BLOCKED
+  TESTING
+  COMPLETED
+  CANCELLED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum IssueSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum IssueStatus {
+  OPEN
+  INVESTIGATING
+  FIXING
+  TESTING
+  RESOLVED
+  CLOSED
+  WONT_FIX
+}
+
+enum RequirementType {
+  FUNCTIONAL
+  NON_FUNCTIONAL
+  CONSTRAINT
+}
+
+enum RequirementStatus {
+  PROPOSED
+  APPROVED
+  IN_PROGRESS
+  IMPLEMENTED
+  DEFERRED
+  REJECTED
+}
+
+enum FeatureStatus {
+  PLANNED
+  BUILDING
+  TESTING
+  COMPLETED
+  DROPPED
+}
+
+enum ResearchType {
+  TECHNICAL
+  MARKET
+  USER
+  COMPETITOR
+  ACADEMIC
+  SECURITY
+  ARCHITECTURE
+  TECHNOLOGY
+  LEGAL
+  OTHER
+}
+
+enum ResearchQuestionStatus {
+  OPEN
+  INVESTIGATING
+  ANSWERED
+  REJECTED
+}
+
+enum ADRStatus {
+  PROPOSED
+  ACCEPTED
+  SUPERSEDED
+  REJECTED
+}
+
+enum MilestoneStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  DELAYED
+  CANCELLED
+}
+
+enum PromptResult {
+  SUCCESSFUL
+  PARTIALLY_SUCCESSFUL
+  FAILED
+  REJECTED
+  NEEDS_MODIFICATION
+}
+
+enum DeploymentEnvironment {
+  LOCAL
+  DEVELOPMENT
+  STAGING
+  PRODUCTION
+}
+
+enum DeploymentStatus {
+  QUEUED
+  IN_PROGRESS
+  SUCCESSFUL
+  FAILED
+  ROLLED_BACK
+}
+
+enum IncidentStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+  CLOSED
+  MONITORING
+}
+
+enum DocumentType {
+  README
+  SRS
+  API_DOCUMENTATION
+  USER_GUIDE
+  INSTALLATION_GUIDE
+  ARCHITECTURE_DOCUMENTATION
+  DEPLOYMENT_GUIDE
+  RESEARCH_REPORT
+  OTHER
+}
+
+enum RelationshipType {
+  RELATED
+  DEPENDS_ON
+  INSPIRED_BY
+  FORKED_FROM
+  REPLACES
+  PART_OF
+}
+
+enum ActivityType {
+  PROJECT_CREATED
+  PROJECT_UPDATED
+  STAGE_CHANGED
+  PROJECT_ARCHIVED
+  PROJECT_ACTIVATED
+  PROJECT_DELETED
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_COMPLETED
+  TASK_DELETED
+  RESEARCH_ADDED
+  RESEARCH_UPDATED
+  RESEARCH_QUESTION_ADDED
+  RESEARCH_QUESTION_UPDATED
+  REQUIREMENT_CREATED
+  REQUIREMENT_UPDATED
+  FEATURE_CREATED
+  FEATURE_UPDATED
+  ADR_CREATED
+  ADR_UPDATED
+  MILESTONE_CREATED
+  ISSUE_CREATED
+  ISSUE_UPDATED
+  ISSUE_RESOLVED
+  NOTE_CREATED
+  NOTE_UPDATED
+  DOCUMENT_CREATED
+  DOCUMENT_UPDATED
+  PROMPT_RECORDED
+  PROMPT_VERSIONED
+  AI_SESSION_RECORDED
+  DEVELOPMENT_SESSION_RECORDED
+  DEPLOYMENT_CREATED
+  DEPLOYMENT_UPDATED
+  PRODUCTION_INCIDENT_CREATED
+  PRODUCTION_INCIDENT_RESOLVED
+  GIT_REFERENCE_ADDED
+  RELATIONSHIP_CREATED
+  EXPORT_CREATED
+}
+
+enum TechCategory {
+  FRONTEND
+  BACKEND
+  DATABASE
+  HOSTING
+  OTHER
+}
+
+enum GitRefKind {
+  REPOSITORY
+  COMMIT
+  BRANCH
+  PULL_REQUEST
+  RELEASE
+}
+
+// ---------------------------------------------------------------------------
+// Core: Projects & tags
+// ---------------------------------------------------------------------------
+
+model Project {
+  id          Int            @id @default(autoincrement())
+  slug        String         @unique
+  name        String
+  description String?
+  problem     String?
+  motivation  String?
+  targetUsers String?
+  expectedValue String?
+  assumptions String?
+  initialQuestions String?
+  inspiration String?
+  originalIdea String? // Immutable snapshot of the idea as captured at creation. History is never erased.
+  stage       LifecycleStage @default(IDEA)
+  isArchived  Boolean        @default(false)
+  archivedAt  DateTime?
+  repositoryUrl String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  
+  research          ResearchEntry[]
+  researchQuestions ResearchQuestion[]
+  requirements      Requirement[]
+  features          Feature[]
+  decisions         ArchitectureDecision[]
+  techStack         TechStackItem[]
+  tables            DatabaseTable[]
+  endpoints         ApiEndpoint[]
+  milestones        Milestone[]
+  tasks             Task[]
+  issues            Issue[]
+  developmentSessions DevelopmentSession[]
+  aiSessions        AiSession[]
+  prompts           Prompt[]
+  documents         ProjectDocument[]
+  notes             Note[]
+  deployments       Deployment[]
+  incidents         ProductionIncident[]
+  activity          ActivityEvent[]
+  gitReferences     GitReference[]
+  relationshipsFrom ProjectRelationship[] @relation("ProjectFrom")
+  relationshipsTo   ProjectRelationship[] @relation("ProjectTo")
+  attachments       Attachment[]
+
+  @@index([stage])
+  @@index([isArchived])
+  @@index([updatedAt])
+  @@map("projects")
+}
+
+model Tag {
+  id        Int            @id @default(autoincrement())
+  name      String         @unique
+  color     String?        @default("#3b82f6")
+  createdAt DateTime       @default(now())
+  assignments TagAssignment[]
+
+  @@map("tags")
+}
+
+// Generic polymorphic tagging. taggableType in: project, task, issue, research,
+// prompt, document, note. Referential integrity is enforced at the application
+// layer; a composite unique index prevents duplicates.
+model TagAssignment {
+  id          Int       @id @default(autoincrement())
+  tagId       Int
+  tag         Tag       @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  taggableType String
+  taggableId  Int
+  createdAt   DateTime  @default(now())
+
+  @@unique([tagId, taggableType, taggableId])
+  @@index([taggableType, taggableId])
+  @@map("tag_assignments")
+}
+
+// ---------------------------------------------------------------------------
+// Research
+// ---------------------------------------------------------------------------
+
+model ResearchEntry {
+  id        Int          @id @default(autoincrement())
+  projectId Int
+  project   Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title     String
+  question  String?
+  type      ResearchType @default(OTHER)
+  source    String?
+  url       String?
+  summary   String?
+  findings  String?
+  relevance String?
+  date      DateTime     @default(now())
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  
+
+  @@index([projectId])
+  @@index([type])
+  @@map("research_entries")
+}
+
+model ResearchQuestion {
+  id            Int                   @id @default(autoincrement())
+  projectId     Int
+  project       Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  question      String
+  answer        String?
+  status        ResearchQuestionStatus @default(OPEN)
+  category      String?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  @@index([projectId])
+  @@index([status])
+  @@map("research_questions")
+}
+
+// ---------------------------------------------------------------------------
+// Requirements & Features
+// ---------------------------------------------------------------------------
+
+model Requirement {
+  id          Int               @id @default(autoincrement())
+  projectId   Int
+  project     Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  code        String            // e.g. FR-001
+  title       String
+  description String?
+  type        RequirementType   @default(FUNCTIONAL)
+  priority    Priority          @default(MEDIUM)
+  status      RequirementStatus @default(PROPOSED)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  tasks       Task[]
+  features    FeatureRequirement[]
+
+  @@unique([projectId, code])
+  @@index([projectId])
+  @@index([status])
+  @@map("requirements")
+}
+
+model Feature {
+  id          Int           @id @default(autoincrement())
+  projectId   Int
+  project     Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  priority    Priority      @default(MEDIUM)
+  status      FeatureStatus @default(PLANNED)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  tasks         Task[]
+  requirements  FeatureRequirement[]
+  promptLinks   Prompt[]
+
+  @@index([projectId])
+  @@index([status])
+  @@map("features")
+}
+
+model FeatureRequirement {
+  id            Int         @id @default(autoincrement())
+  featureId     Int
+  feature       Feature     @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  requirementId Int
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+
+  @@unique([featureId, requirementId])
+  @@map("feature_requirements")
+}
+
+// ---------------------------------------------------------------------------
+// Architecture
+// ---------------------------------------------------------------------------
+
+model ArchitectureDecision {
+  id            Int           @id @default(autoincrement())
+  projectId     Int
+  project       Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  code          String        // ADR-001
+  title         String
+  decision      String?
+  context       String?
+  alternatives  String?       // JSON array of alternatives
+  reasoning     String?
+  consequences  String?
+  status        ADRStatus     @default(PROPOSED)
+  supersededById Int?
+  supersededBy  ArchitectureDecision? @relation("ADRSupersession", fields: [supersededById], references: [id], onDelete: SetNull)
+  supersedes    ArchitectureDecision[] @relation("ADRSupersession")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@unique([projectId, code])
+  @@index([projectId])
+  @@map("architecture_decisions")
+}
+
+model TechStackItem {
+  id        Int         @id @default(autoincrement())
+  projectId Int
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  category  TechCategory
+  technology String
+  version   String?
+  notes     String?
+  createdAt DateTime    @default(now())
+
+  @@index([projectId])
+  @@map("tech_stack")
+}
+
+model DatabaseTable {
+  id        Int      @id @default(autoincrement())
+  projectId Int
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String
+  purpose   String?
+  columns   String?  // JSON array of {name, type, notes, key}
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+  @@map("database_tables")
+}
+
+model ApiEndpoint {
+  id          Int      @id @default(autoincrement())
+  projectId   Int
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  method      String   // GET, POST, PUT, DELETE, PATCH
+  path        String
+  description String?
+  requestBody String?
+  response    String?
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([projectId])
+  @@map("api_endpoints")
+}
+
+// ---------------------------------------------------------------------------
+// Tasks, milestones, issues
+// ---------------------------------------------------------------------------
+
+model Milestone {
+  id          Int             @id @default(autoincrement())
+  projectId   Int
+  project     Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  targetDate  DateTime?
+  status      MilestoneStatus @default(PLANNED)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  tasks Task[]
+
+  @@index([projectId])
+  @@map("milestones")
+}
+
+model Task {
+  id              Int         @id @default(autoincrement())
+  projectId       Int
+  project         Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  code            String      // TASK-001
+  title           String
+  description     String?
+  status          TaskStatus  @default(TODO)
+  priority        Priority    @default(MEDIUM)
+  dueDate         DateTime?
+  completedAt     DateTime?
+  milestoneId     Int?
+  milestone       Milestone?  @relation(fields: [milestoneId], references: [id], onDelete: SetNull)
+  featureId       Int?
+  feature         Feature?    @relation(fields: [featureId], references: [id], onDelete: SetNull)
+  requirementId   Int?
+  requirement     Requirement? @relation(fields: [requirementId], references: [id], onDelete: SetNull)
+  devSessionId    Int?
+  devSession      DevelopmentSession? @relation(fields: [devSessionId], references: [id], onDelete: SetNull)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  
+  promptLinks    Prompt[]
+
+  @@unique([projectId, code])
+  @@index([projectId])
+  @@index([status])
+  @@index([featureId])
+  @@map("tasks")
+}
+
+model Issue {
+  id            Int          @id @default(autoincrement())
+  projectId     Int
+  project       Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  code          String       // ISSUE-001
+  title         String
+  description   String?
+  severity      IssueSeverity @default(MEDIUM)
+  priority      Priority     @default(MEDIUM)
+  status        IssueStatus  @default(OPEN)
+  stepsToReproduce String?
+  expectedBehavior String?
+  actualBehavior   String?
+  environment      String?
+  possibleCause    String?
+  solution         String?
+  resolvedAt       DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  
+  promptLinks    Prompt[]
+
+  @@unique([projectId, code])
+  @@index([projectId])
+  @@index([status])
+  @@map("issues")
+}
+
+// ---------------------------------------------------------------------------
+// Sessions & AI
+// ---------------------------------------------------------------------------
+
+model DevelopmentSession {
+  id       Int    @id @default(autoincrement())
+  projectId Int
+  project  Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  number   Int         // Human-facing session number per project
+  date     DateTime    @default(now())
+  durationMinutes Int?
+  goal     String?
+  workedOn String?
+  completed String?
+  problems String?
+  learned  String?
+  nextStep String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  tasks Task[]
+
+  @@unique([projectId, number])
+  @@index([projectId])
+  @@map("development_sessions")
+}
+
+model AiSession {
+  id         Int        @id @default(autoincrement())
+  projectId  Int
+  project    Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  number     Int
+  tool       String     // Claude Code, ChatGPT, Codex, Cursor, Other...
+  model      String?
+  date       DateTime   @default(now())
+  durationMinutes Int?
+  purpose    String?
+  promptText String?
+  responseText String?
+  usedFromAI  String?
+  rejectedFromAI String?
+  changesMade String?
+  result     PromptResult @default(SUCCESSFUL)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@unique([projectId, number])
+  @@index([projectId])
+  @@map("ai_sessions")
+}
+
+model Prompt {
+  id          Int           @id @default(autoincrement())
+  projectId   Int
+  project     Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  code        String        // PROMPT-0042
+  title       String?
+  purpose     String?
+  category    String?       // Planning, Architecture, Coding, Debugging, ...
+  stage       LifecycleStage?
+  tool        String?       // AI tool used
+  model       String?
+  date        DateTime      @default(now())
+  taskId      Int?
+  task        Task?         @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  featureId   Int?
+  feature     Feature?      @relation(fields: [featureId], references: [id], onDelete: SetNull)
+  issueId     Int?
+  issue       Issue?        @relation(fields: [issueId], references: [id], onDelete: SetNull)
+  result      PromptResult  @default(PARTIALLY_SUCCESSFUL)
+  resultNote  String?       // Why it failed / what fixed it
+  finalVersionId Int?       // Version that produced the final implementation
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  versions     PromptVersion[]
+  
+
+  @@unique([projectId, code])
+  @@index([projectId])
+  @@index([category])
+  @@index([result])
+  @@index([date])
+  @@map("prompts")
+}
+
+model PromptVersion {
+  id       Int      @id @default(autoincrement())
+  promptId Int
+  prompt   Prompt   @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  version  Int      // 1, 2, 3...
+  text     String
+  response String?  // AI response for this version
+  changes  String?  // What changed from previous version
+  reason   String?  // Why it was changed
+  isFinal  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@unique([promptId, version])
+  @@index([promptId])
+  @@map("prompt_versions")
+}
+
+// ---------------------------------------------------------------------------
+// Documentation
+// ---------------------------------------------------------------------------
+
+model ProjectDocument {
+  id        Int          @id @default(autoincrement())
+  projectId Int
+  project   Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type      DocumentType @default(OTHER)
+  title     String
+  format    String       @default("markdown")
+  currentVersion Int     @default(1)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  versions ProjectDocumentVersion[]
+  
+
+  @@index([projectId])
+  @@map("project_documents")
+}
+
+model ProjectDocumentVersion {
+  id          Int             @id @default(autoincrement())
+  documentId  Int
+  document    ProjectDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  version     Int
+  title       String
+  content     String           @default("")
+  reason      String?
+  createdAt   DateTime         @default(now())
+
+  @@unique([documentId, version])
+  @@index([documentId])
+  @@map("document_versions")
+}
+
+model Note {
+  id        Int       @id @default(autoincrement())
+  projectId Int
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title     String?
+  content   String    @default("")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  
+
+  @@index([projectId])
+  @@map("notes")
+}
+
+// ---------------------------------------------------------------------------
+// Delivery
+// ---------------------------------------------------------------------------
+
+model Deployment {
+  id          Int                  @id @default(autoincrement())
+  projectId   Int
+  project     Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  environment DeploymentEnvironment @default(DEVELOPMENT)
+  version     String?
+  platform    String?
+  url         String?
+  commitHash  String?
+  commitMessage String?
+  branch      String?
+  pullRequest String?
+  tag         String?
+  date        DateTime             @default(now())
+  status      DeploymentStatus     @default(QUEUED)
+  notes       String?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@index([projectId])
+  @@index([environment, status])
+  @@map("deployments")
+}
+
+model ProductionIncident {
+  id          Int            @id @default(autoincrement())
+  projectId   Int
+  project     Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  severity    IssueSeverity  @default(HIGH)
+  status      IncidentStatus @default(OPEN)
+  startedAt   DateTime       @default(now())
+  resolvedAt  DateTime?
+  resolution  String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([projectId])
+  @@index([status])
+  @@map("production_incidents")
+}
+
+model GitReference {
+  id        Int         @id @default(autoincrement())
+  projectId Int
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  kind      GitRefKind  @default(COMMIT)
+  repositoryUrl String?
+  branch    String?
+  commitHash String?
+  commitMessage String?
+  pullRequest String?
+  release   String?
+  date      DateTime    @default(now())
+  notes     String?
+  createdAt DateTime    @default(now())
+
+  @@index([projectId])
+  @@map("git_references")
+}
+
+// ---------------------------------------------------------------------------
+// History & relationships
+// ---------------------------------------------------------------------------
+
+model ActivityEvent {
+  id        Int          @id @default(autoincrement())
+  projectId Int
+  project   Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type      ActivityType
+  description String
+  metadata  String?      // JSON payload (e.g. {"fromStage":"IDEA","toStage":"BUILDING"})
+  relatedType String?    // model name
+  relatedId Int?
+  createdAt DateTime     @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([type])
+  @@map("activity_events")
+}
+
+model ProjectRelationship {
+  id        Int              @id @default(autoincrement())
+  fromProjectId Int
+  fromProject   Project      @relation("ProjectFrom", fields: [fromProjectId], references: [id], onDelete: Cascade)
+  toProjectId   Int
+  toProject     Project      @relation("ProjectTo", fields: [toProjectId], references: [id], onDelete: Cascade)
+  type      RelationshipType @default(RELATED)
+  notes     String?
+  createdAt DateTime         @default(now())
+
+  @@unique([fromProjectId, toProjectId, type])
+  @@index([fromProjectId])
+  @@index([toProjectId])
+  @@map("project_relationships")
+}
+
+// ---------------------------------------------------------------------------
+// Attachments (prepared for future file storage)
+// ---------------------------------------------------------------------------
+
+model Attachment {
+  id          Int      @id @default(autoincrement())
+  projectId   Int
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  recordType  String   // research, task, issue, prompt, document, deploy, etc.
+  recordId    Int?
+  filename    String
+  mimeType    String?
+  sizeBytes   Int?
+  storagePath String?  // where the file lives (S3/local/...); storage engine pluggable
+  uploadedAt  DateTime @default(now())
+
+  @@index([projectId])
+  @@index([recordType, recordId])
+  @@map("attachments")
+}
