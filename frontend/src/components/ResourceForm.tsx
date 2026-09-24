@@ -5,6 +5,22 @@ import { TagEditor } from './TagEditor';
 
 export type FormValues = Record<string, unknown>;
 
+function toTagNames(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const strings = raw
+    .filter((t): t is string => typeof t === 'string')
+    .map(t => t.trim().toLowerCase())
+    .filter(Boolean);
+  const objects = raw
+    .filter(
+      (t): t is { name: unknown } =>
+        !!t && typeof t === 'object' && typeof (t as { name?: unknown }).name === 'string'
+    )
+    .map(t => String((t as { name: string }).name).trim().toLowerCase())
+    .filter(Boolean);
+  return [...strings, ...objects];
+}
+
 function initialValue(field: FieldDef, initial?: FormValues): unknown {
   const raw = initial?.[field.name];
   if (raw === undefined || raw === null) return '';
@@ -46,7 +62,7 @@ export function ResourceForm({
     }
     return v;
   });
-  const [tags, setTags] = useState<string[]>(Array.isArray(initial?.tags) ? (initial!.tags as string[]) : []);
+  const [tags, setTags] = useState<string[]>(() => toTagNames(initial?.tags));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [options, setOptions] = useState<Record<string, { id: number; label: string }[]>>({});
