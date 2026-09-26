@@ -5,6 +5,7 @@ import { useApi } from '../lib/useApi';
 import { useApp } from '../context/AppContext';
 import { ConfirmButton, EmptyState, Loading, Modal, StageBadge } from '../components/ui';
 import { ResourceForm, type FormValues } from '../components/ResourceForm';
+import { DocumentImportWizard } from '../components/DocumentImportWizard';
 import { STAGES, humanize } from '../resources';
 import { PROJECT_CONFIG } from '../projectConfig';
 import type { FullProject, ProjectSummary } from '../api/types';
@@ -16,8 +17,14 @@ export function Portfolio() {
   const [stage, setStage] = useState('');
   const [archived, setArchived] = useState<'all' | 'active' | 'only'>('all');
   const [creating, setCreating] = useState(false);
+  const [mode, setMode] = useState<'manual' | 'import' | null>(null);
   const [editing, setEditing] = useState<FullProject | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
+
+  const closeNew = () => {
+    setCreating(false);
+    setMode(null);
+  };
 
   const path = `/projects${qs({ q: q || undefined, stage: stage || undefined, archived })}`;
   const { data, loading, reload } = useApi<ProjectSummary[]>(path);
@@ -44,7 +51,7 @@ export function Portfolio() {
   const create = async (values: FormValues, tags: string[]) => {
     await api.post('/projects', { ...values, tags });
     toast('Project created');
-    setCreating(false);
+    closeNew();
     afterWrite();
   };
 
@@ -169,17 +176,58 @@ export function Portfolio() {
       )}
 
       {creating ? (
-        <Modal title="New Project" onClose={() => setCreating(false)} wide>
+        <Modal title="New Project" onClose={closeNew} wide>
+          <div className="grid c2" style={{ gap: 12 }}>
+            <div className="card grid" style={{ gap: 8 }}>
+              <strong>Create Manually</strong>
+              <div className="tiny dim">
+                Type the project details yourself into Project Hub's own fields. Nothing is read from a file.
+              </div>
+              <div>
+                <button className="btn primary" onClick={() => setMode('manual')}>
+                  Create Manually
+                </button>
+              </div>
+            </div>
+            <div className="card grid" style={{ gap: 8 }}>
+              <strong>Import From Document</strong>
+              <div className="tiny dim">
+                Read a .txt, .md, .json, .docx or .pdf document, review everything it found, then create one new
+                project. No existing project is ever modified.
+              </div>
+              <div>
+                <button className="btn primary" onClick={() => setMode('import')}>
+                  Import From Document
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
+
+      {mode === 'manual' ? (
+        <Modal title="New Project" onClose={closeNew} wide>
           <ResourceForm
             config={PROJECT_CONFIG}
             projectId={0}
             initial={{ stage: 'IDEA' }}
             tagSuggestions={tagSuggestions}
             submitLabel="Create project"
-            onCancel={() => setCreating(false)}
+            onCancel={closeNew}
             onSubmit={create}
           />
         </Modal>
+      ) : null}
+
+      {mode === 'import' ? (
+        <DocumentImportWizard
+          onClose={closeNew}
+          onCreated={result => {
+            toast(`Project "${result.slug}" created from document`);
+            closeNew();
+            afterWrite();
+          }}
+        />
       ) : null}
 
       {editing ? (

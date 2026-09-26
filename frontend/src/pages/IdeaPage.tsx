@@ -16,6 +16,7 @@ const IDEA_FIELDS: { key: string; label: string }[] = [
   { key: 'assumptions', label: 'Assumptions' },
   { key: 'initialQuestions', label: 'Initial questions' },
   { key: 'inspiration', label: 'Inspiration' },
+  { key: 'v1Scope', label: 'V1 scope' },
   { key: 'repositoryUrl', label: 'Repository' }
 ];
 

@@ -1,4 +1,4 @@
-import { ActivityType, Prisma } from '@prisma/client';
+import { ActivityType, Prisma, PrismaClient } from '@prisma/client';
 import { prisma } from './prisma.js';
 
 export interface ActivityInput {
@@ -10,8 +10,13 @@ export interface ActivityInput {
   relatedId?: number;
 }
 
-export async function logActivity(input: ActivityInput): Promise<void> {
-  await prisma.activityEvent.create({
+/**
+ * Writes an activity row. Pass a transaction client to keep the row inside a
+ * caller's transaction; omitting it uses the shared client, which is what the
+ * ordinary request handlers do.
+ */
+export async function logActivity(input: ActivityInput, client: Prisma.TransactionClient | PrismaClient = prisma): Promise<void> {
+  await client.activityEvent.create({
     data: {
       projectId: input.projectId,
       type: input.type,

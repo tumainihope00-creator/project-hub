@@ -53,14 +53,14 @@ export const RESEARCH_TYPES = ['TECHNICAL', 'MARKET', 'USER', 'COMPETITOR', 'ACA
 export const RQ_STATUSES = ['OPEN', 'INVESTIGATING', 'ANSWERED', 'REJECTED'];
 export const ADR_STATUSES = ['PROPOSED', 'ACCEPTED', 'SUPERSEDED', 'REJECTED'];
 export const MILESTONE_STATUSES = ['PLANNED', 'IN_PROGRESS', 'COMPLETED', 'DELAYED', 'CANCELLED'];
-export const PROMPT_RESULTS = ['SUCCESSFUL', 'PARTIALLY_SUCCESSFUL', 'FAILED', 'REJECTED', 'NEEDS_MODIFICATION'];
+export const PROMPT_RESULTS = ['GENERATED', 'SUCCESSFUL', 'PARTIALLY_SUCCESSFUL', 'FAILED', 'REJECTED', 'NEEDS_MODIFICATION'];
 export const DEPLOY_ENVS = ['LOCAL', 'DEVELOPMENT', 'STAGING', 'PRODUCTION'];
 export const DEPLOY_STATUSES = ['QUEUED', 'IN_PROGRESS', 'SUCCESSFUL', 'FAILED', 'ROLLED_BACK'];
 export const INCIDENT_STATUSES = ['OPEN', 'INVESTIGATING', 'RESOLVED', 'CLOSED', 'MONITORING'];
 export const DOC_TYPES = ['README', 'SRS', 'API_DOCUMENTATION', 'USER_GUIDE', 'INSTALLATION_GUIDE', 'ARCHITECTURE_DOCUMENTATION', 'DEPLOYMENT_GUIDE', 'RESEARCH_REPORT', 'OTHER'];
 export const GIT_KINDS = ['REPOSITORY', 'COMMIT', 'BRANCH', 'PULL_REQUEST', 'RELEASE'];
 export const TECH_CATEGORIES = ['FRONTEND', 'BACKEND', 'DATABASE', 'HOSTING', 'OTHER'];
-export const PROMPT_CATEGORIES = ['Planning', 'Architecture', 'Coding', 'Debugging', 'Refactoring', 'Testing', 'Database', 'Deployment', 'Research', 'Documentation', 'Security'];
+export const PROMPT_CATEGORIES = ['Planning', 'Architecture', 'Coding', 'Debugging', 'Refactoring', 'Testing', 'Database', 'Deployment', 'Research', 'Documentation', 'Security', 'V1 Build Prompt'];
 
 export const RESOURCES: Record<string, ResourceConfig> = {
   research: {

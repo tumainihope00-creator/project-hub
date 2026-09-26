@@ -46,6 +46,7 @@ const projectCreateSchema = z.object({
   assumptions: z.string().trim().max(20000).optional().nullable(),
   initialQuestions: z.string().trim().max(20000).optional().nullable(),
   inspiration: z.string().trim().max(5000).optional().nullable(),
+  v1Scope: z.string().trim().max(20000).optional().nullable(),
   stage: z.enum(STAGES).optional().default('IDEA'),
   repositoryUrl: z.string().trim().max(1000).optional().nullable(),
   tags: z.array(z.string()).optional()

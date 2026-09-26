@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { isoDate, optInt, optStr, optText, reqStr } from './lib/validation.js';
-import type { ActivityType, PromptResult } from '@prisma/client';
+import type { ActivityType, Prisma, PromptResult } from '@prisma/client';
 
 // ---------------------------------------------------------------------------
 // Enum value lists (must match Prisma schema)
@@ -21,7 +21,14 @@ export const RESEARCH_TYPES = ['TECHNICAL', 'MARKET', 'USER', 'COMPETITOR', 'ACA
 export const RQ_STATUSES = ['OPEN', 'INVESTIGATING', 'ANSWERED', 'REJECTED'] as const;
 export const ADR_STATUSES = ['PROPOSED', 'ACCEPTED', 'SUPERSEDED', 'REJECTED'] as const;
 export const MILESTONE_STATUSES = ['PLANNED', 'IN_PROGRESS', 'COMPLETED', 'DELAYED', 'CANCELLED'] as const;
-export const PROMPT_RESULTS = ['SUCCESSFUL', 'PARTIALLY_SUCCESSFUL', 'FAILED', 'REJECTED', 'NEEDS_MODIFICATION'] as const;
+export const PROMPT_RESULTS = [
+  'GENERATED',
+  'SUCCESSFUL',
+  'PARTIALLY_SUCCESSFUL',
+  'FAILED',
+  'REJECTED',
+  'NEEDS_MODIFICATION'
+] as const;
 export const DEPLOY_ENVS = ['LOCAL', 'DEVELOPMENT', 'STAGING', 'PRODUCTION'] as const;
 export const DEPLOY_STATUSES = ['QUEUED', 'IN_PROGRESS', 'SUCCESSFUL', 'FAILED', 'ROLLED_BACK'] as const;
 export const INCIDENT_STATUSES = ['OPEN', 'INVESTIGATING', 'RESOLVED', 'CLOSED', 'MONITORING'] as const;
@@ -66,6 +73,13 @@ export interface ResourceDef {
 
 export interface Ctx {
   projectId: number;
+  /**
+   * Set when the caller is inside a transaction (the document importer is).
+   * Hooks must use this client when they write, so their rows join the
+   * transaction instead of escaping it. Left undefined by ordinary requests,
+   * which keep using the shared Prisma client.
+   */
+  client?: Prisma.TransactionClient;
 }
 
 const enumZ = (values: readonly string[]) => z.enum(values as [string, ...string[]]);
@@ -358,29 +372,35 @@ export const RESOURCES: ResourceDef[] = [
     updateSchema: partial(taskCreate),
     activity: { create: 'TASK_CREATED', update: 'TASK_UPDATED' },
     hooks: {
-      afterUpdate: async (row, input) => {
+      afterUpdate: async (row, input, ctx) => {
         if (input.status === 'COMPLETED' && row.status === 'COMPLETED') {
           await import('./lib/activity.js').then(m =>
-            m.logActivity({
-              projectId: row.projectId,
-              type: 'TASK_COMPLETED',
-              description: `Task ${row.code || row.id} completed: ${row.title}`,
-              relatedType: 'task',
-              relatedId: row.id
-            })
+            m.logActivity(
+              {
+                projectId: row.projectId,
+                type: 'TASK_COMPLETED',
+                description: `Task ${row.code || row.id} completed: ${row.title}`,
+                relatedType: 'task',
+                relatedId: row.id
+              },
+              ctx.client
+            )
           );
         }
       },
-      afterCreate: async (row, input) => {
+      afterCreate: async (row, input, ctx) => {
         if (input.status === 'COMPLETED') {
           await import('./lib/activity.js').then(m =>
-            m.logActivity({
-              projectId: row.projectId,
-              type: 'TASK_COMPLETED',
-              description: `Task ${row.code || row.id} completed on creation: ${row.title}`,
-              relatedType: 'task',
-              relatedId: row.id
-            })
+            m.logActivity(
+              {
+                projectId: row.projectId,
+                type: 'TASK_COMPLETED',
+                description: `Task ${row.code || row.id} completed on creation: ${row.title}`,
+                relatedType: 'task',
+                relatedId: row.id
+              },
+              ctx.client
+            )
           );
         }
       }
@@ -455,15 +475,18 @@ export const RESOURCES: ResourceDef[] = [
     updateSchema: partial(promptCreate),
     activity: { create: 'PROMPT_RECORDED', update: 'PROMPT_RECORDED' },
     hooks: {
-      afterCreate: async (row, _input) => {
+      afterCreate: async (row, _input, ctx) => {
         await import('./lib/activity.js').then(m =>
-          m.logActivity({
-            projectId: row.projectId,
-            type: 'PROMPT_VERSIONED',
-            description: `Initial version v1 recorded for prompt ${row.code}`,
-            relatedType: 'prompt',
-            relatedId: row.id
-          })
+          m.logActivity(
+            {
+              projectId: row.projectId,
+              type: 'PROMPT_VERSIONED',
+              description: `Initial version v1 recorded for prompt ${row.code}`,
+              relatedType: 'prompt',
+              relatedId: row.id
+            },
+            ctx.client
+          )
         );
       }
     },
@@ -515,16 +538,19 @@ export const RESOURCES: ResourceDef[] = [
     updateSchema: partial(incidentCreate),
     activity: { create: 'PRODUCTION_INCIDENT_CREATED', update: 'PRODUCTION_INCIDENT_RESOLVED' },
     hooks: {
-      afterUpdate: async (row) => {
+      afterUpdate: async (row, _input, ctx) => {
         if (row.status === 'RESOLVED' || row.status === 'CLOSED') {
           await import('./lib/activity.js').then(m =>
-            m.logActivity({
-              projectId: row.projectId,
-              type: 'PRODUCTION_INCIDENT_RESOLVED',
-              description: `Production incident resolved: ${row.title}`,
-              relatedType: 'productionIncident',
-              relatedId: row.id
-            })
+            m.logActivity(
+              {
+                projectId: row.projectId,
+                type: 'PRODUCTION_INCIDENT_RESOLVED',
+                description: `Production incident resolved: ${row.title}`,
+                relatedType: 'productionIncident',
+                relatedId: row.id
+              },
+              ctx.client
+            )
           );
         }
       }
@@ -553,21 +579,26 @@ export const RESOURCES: ResourceDef[] = [
     updateSchema: partial(decisionCreate),
     activity: { create: 'ADR_CREATED', update: 'ADR_UPDATED' },
     hooks: {
-      afterSave: async (row, input) => {
+      afterSave: async (row, input, ctx) => {
         if (input.supersededById) {
-          const { prisma } = await import('./lib/prisma.js');
+          // Prefer the caller's transaction client so a supersede cannot leave
+          // a half-applied change behind when the surrounding write rolls back.
+          const client = ctx.client ?? (await import('./lib/prisma.js')).prisma;
           const { logActivity } = await import('./lib/activity.js');
-          await prisma.architectureDecision.update({
+          await client.architectureDecision.update({
             where: { id: Number(input.supersededById) },
             data: { status: 'SUPERSEDED' }
           });
-          await logActivity({
-            projectId: row.projectId,
-            type: 'ADR_UPDATED',
-            description: `${row.code} marked ADR ${String(input.supersededById)} as superseded`,
-            relatedType: 'architectureDecision',
-            relatedId: row.id
-          });
+          await logActivity(
+            {
+              projectId: row.projectId,
+              type: 'ADR_UPDATED',
+              description: `${row.code} marked ADR ${String(input.supersededById)} as superseded`,
+              relatedType: 'architectureDecision',
+              relatedId: row.id
+            },
+            ctx.client
+          );
         }
       }
     },

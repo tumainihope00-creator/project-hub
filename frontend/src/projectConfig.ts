@@ -19,6 +19,7 @@ export const PROJECT_CONFIG: ResourceConfig = {
     { name: 'assumptions', label: 'Assumptions', type: 'textarea', rows: 2 },
     { name: 'initialQuestions', label: 'Initial questions', type: 'textarea', rows: 2 },
     { name: 'inspiration', label: 'Inspiration', type: 'text' },
+    { name: 'v1Scope', label: 'V1 scope — what must exist in the first usable version', type: 'textarea', rows: 3, help: 'Used by the V1 Prompt Generator to keep the build focused.' },
     { name: 'repositoryUrl', label: 'Repository URL', type: 'url' },
     { name: 'tags', label: 'Tags', type: 'tags' }
   ],

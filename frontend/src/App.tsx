@@ -15,6 +15,7 @@ import { DevelopmentPage } from './pages/DevelopmentPage';
 import { ProductionPage } from './pages/ProductionPage';
 import { TestingPage } from './pages/TestingPage';
 import { PromptsPage } from './pages/PromptsPage';
+import { V1PromptGenerator } from './pages/V1PromptGenerator';
 import { DocumentsPage } from './pages/DocumentsPage';
 import { ResourcePage } from './pages/ResourcePage';
 import { FeaturesPage } from './pages/FeaturesPage';
@@ -40,6 +41,7 @@ export default function App() {
             <Route path="decisions" element={<ResourcePage configKey="decisions" />} />
             <Route path="development" element={<DevelopmentPage />} />
             <Route path="prompts" element={<PromptsPage />} />
+            <Route path="prompt-generator" element={<V1PromptGenerator />} />
             <Route path="bugs" element={<ResourcePage configKey="issues" />} />
             <Route path="testing" element={<TestingPage />} />
             <Route path="deployments" element={<ResourcePage configKey="deployments" />} />

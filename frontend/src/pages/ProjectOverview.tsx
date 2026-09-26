@@ -94,11 +94,19 @@ export function ProjectOverview() {
           <h2 className="section">The idea</h2>
           <div className="card">
             <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{project.description || project.problem || 'No description yet.'}</p>
-            <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+            <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <Link className="btn sm" to="idea">
                 View full idea
               </Link>
+              <Link className="btn sm primary" to="prompt-generator">
+                Generate V1 prompt
+              </Link>
             </div>
+            {project.stage === 'IDEA' && !project.v1Scope ? (
+              <div className="dim tiny" style={{ marginTop: 10 }}>
+                Tip: define a V1 scope on the Idea page so the generator knows what the first usable version must include.
+              </div>
+            ) : null}
           </div>
 
           <h2 className="section">Activity heatmap (last 10 weeks)</h2>

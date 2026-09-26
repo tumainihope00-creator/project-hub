@@ -8,6 +8,8 @@ import { RESOURCES } from './resources.js';
 import { resourceRouter, promptVersionRouter, documentVersionRouter, featureRequirementsRouter } from './routes/generic.js';
 import projectsRouter from './routes/projects.js';
 import miscRouter from './routes/misc.js';
+import { generatorRouter } from './routes/generator.js';
+import { importRouter } from './routes/import.js';
 
 export function createApp() {
   const app = express();
@@ -43,6 +45,12 @@ export function createApp() {
   app.use('/api/projects', projectsRouter);
   app.use('/api', miscRouter);
 
+  // Document import (creates new projects only; never modifies existing data)
+  app.use('/api/import', importRouter);
+
+  // V1 Prompt Generator (project-scoped)
+  app.use('/api/projects/:projectId/generator', generatorRouter());
+
   // Generic project-scoped resource routes
   for (const def of RESOURCES) {
     const base = `/api/projects/:projectId/${def.path}`;
@@ -52,25 +60,75 @@ export function createApp() {
     if (def.path === 'features') app.use(base, featureRequirementsRouter());
   }
 
-  app.use((_req, res) => {
-    res.status(404).json({ error: { message: 'Not found' } });
+  // Any unmatched route: say what was wrong, never a bare "Not found".
+  app.use((req, res) => {
+    res.status(404).json({
+      error: {
+        message: `No API route matches ${req.method} ${req.path}.`,
+        category: 'NOT_FOUND',
+        operation: 'route the request to an API handler',
+        possibleAction:
+          'This is an internal link or client bug, not missing project data. Check the URL, or reload the Project Hub page.'
+      }
+    });
   });
 
-  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof ApiError) {
-      return res.status(err.status).json({ error: { message: err.message, details: err.details } });
+      return res.status(err.status).json({ error: err.toBody() });
     }
-    if (err && typeof err === 'object' && (err as any).code === 'P2025') {
-      return res.status(404).json({ error: { message: 'Record not found' } });
+    const code = err && typeof err === 'object' ? (err as any).code : undefined;
+    if (code === 'P2025') {
+      return res.status(404).json({
+        error: {
+          message: 'The requested record no longer exists.',
+          category: 'NOT_FOUND',
+          operation: 'load a record by id',
+          possibleAction: 'It may have been deleted. Reload the page to see the current data.'
+        }
+      });
     }
-    if (err && typeof err === 'object' && (err as any).code === 'P2002') {
-      return res.status(409).json({ error: { message: 'Unique constraint violation' } });
+    if (code === 'P2002') {
+      return res.status(409).json({
+        error: {
+          message: 'A record with the same unique key already exists.',
+          category: 'VALIDATION_FAILED',
+          operation: 'write a record with a unique constraint',
+          details: (err as any).meta,
+          possibleAction: 'Use a different value for the duplicated field.'
+        }
+      });
     }
-    if (err && typeof err === 'object' && (err as any).code === 'P2003') {
-      return res.status(409).json({ error: { message: 'Foreign key constraint violation', details: (err as any).meta } });
+    if (code === 'P2003') {
+      return res.status(409).json({
+        error: {
+          message: 'This change would break a reference to a record that does not exist.',
+          category: 'VALIDATION_FAILED',
+          operation: 'write a record with a foreign key',
+          details: (err as any).meta,
+          possibleAction: 'Create the referenced record first, or clear the reference.'
+        }
+      });
     }
+    // Prisma/connection failures: a system problem, not missing information.
+    const message = err instanceof Error ? err.message : String(err);
+    const isDbProblem =
+      code?.startsWith?.('P') === true ||
+      /prisma|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|timeout|socket|pool/i.test(message);
     console.error(err);
-    res.status(500).json({ error: { message: 'Internal server error' } });
+    return res.status(500).json({
+      error: {
+        message: isDbProblem
+          ? 'Project Hub could not reach its database, so the project data could not be read.'
+          : 'Project Hub hit an unexpected internal error while handling this request.',
+        category: isDbProblem ? 'SYSTEM_ERROR' : 'SYSTEM_ERROR',
+        operation: `${req.method} ${req.path}`,
+        possibleAction: isDbProblem
+          ? 'Check that the database is running and DATABASE_URL is correct, then retry.'
+          : 'Retry. If it keeps failing, check the backend logs for the stack trace.',
+        details: { cause: message }
+      }
+    });
   });
 
   return app;

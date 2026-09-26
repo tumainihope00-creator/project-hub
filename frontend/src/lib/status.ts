@@ -43,6 +43,7 @@ export const STATUS_COLORS: Record<string, string> = {
   SUPERSEDED: '#6e7681',
   ANSWERED: '#3fb950',
   // prompts
+  GENERATED: '#8b949e',
   SUCCESSFUL: '#3fb950',
   PARTIALLY_SUCCESSFUL: '#d29922',
   FAILED: '#f85149',

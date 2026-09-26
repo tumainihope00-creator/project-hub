@@ -15,6 +15,7 @@ async function clearAll() {
   await prisma.tagAssignment.deleteMany();
   await prisma.activityEvent.deleteMany();
   await prisma.projectRelationship.deleteMany();
+  await prisma.promptGeneration.deleteMany();
   await prisma.promptVersion.deleteMany();
   await prisma.projectDocumentVersion.deleteMany();
   await prisma.gitReference.deleteMany();
@@ -92,6 +93,7 @@ async function main() {
       expectedValue: 'Save 1-2 hours per assignment and produce consistently well-formatted submissions.',
       assumptions: 'Students are willing to paste their raw content into a web app; most assignments can be normalised into a predictable structure.',
       initialQuestions: 'Which output formats matter most? Should it support academic citations?',
+      v1Scope: 'Paste assignment text in a browser, format it into clean heading structure with a bibliography, preview the result, and export it as DOCX. Citation detection, PDF export and multiple user accounts are out of scope for V1.',
       inspiration: 'Frustration with an afternoon wasted reformatting an essay in Word.',
       stage: 'BUILDING',
       createdAt: daysAgo(52),

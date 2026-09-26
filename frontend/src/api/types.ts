@@ -51,6 +51,7 @@ export interface FullProject extends ProjectSummary {
   assumptions?: string | null;
   initialQuestions?: string | null;
   inspiration?: string | null;
+  v1Scope?: string | null;
   originalIdea?: string | null;
   repositoryUrl?: string | null;
 }
