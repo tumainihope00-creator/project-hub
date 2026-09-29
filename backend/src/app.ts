@@ -10,6 +10,7 @@ import projectsRouter from './routes/projects.js';
 import miscRouter from './routes/misc.js';
 import { generatorRouter } from './routes/generator.js';
 import { importRouter } from './routes/import.js';
+import settingsRouter from './routes/settings.js';
 
 export function createApp() {
   const app = express();
@@ -44,6 +45,9 @@ export function createApp() {
 
   app.use('/api/projects', projectsRouter);
   app.use('/api', miscRouter);
+
+  // Application settings (Projects Root). Application-wide, not project data.
+  app.use('/api/settings', settingsRouter);
 
   // Document import (creates new projects only; never modifies existing data)
   app.use('/api/import', importRouter);

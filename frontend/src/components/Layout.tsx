@@ -47,6 +47,9 @@ export function Layout() {
             <span className="ico">#</span> Tags
             <span className="count">{tags.length}</span>
           </NavLink>
+          <NavLink to="/settings" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
+            <span className="ico">⚙</span> Settings
+          </NavLink>
 
           <div className="nav-section">
             <span>Projects</span>

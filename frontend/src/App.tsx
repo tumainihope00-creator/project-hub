@@ -5,6 +5,7 @@ import { Dashboard } from './pages/Dashboard';
 import { Portfolio } from './pages/Portfolio';
 import { SearchPage } from './pages/SearchPage';
 import { TagsPage } from './pages/TagsPage';
+import { SettingsPage } from './pages/SettingsPage';
 import { ProjectLayout } from './pages/ProjectLayout';
 import { ProjectOverview } from './pages/ProjectOverview';
 import { IdeaPage } from './pages/IdeaPage';
@@ -29,6 +30,7 @@ export default function App() {
           <Route path="projects" element={<Portfolio />} />
           <Route path="search" element={<SearchPage />} />
           <Route path="tags" element={<TagsPage />} />
+          <Route path="settings" element={<SettingsPage />} />
           <Route path="projects/:slug" element={<ProjectLayout />}>
             <Route index element={<ProjectOverview />} />
             <Route path="idea" element={<IdeaPage />} />

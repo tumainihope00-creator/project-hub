@@ -255,6 +255,12 @@ model Project {
   isArchived  Boolean        @default(false)
   archivedAt  DateTime?
   repositoryUrl String?
+  // Physical workspace on disk (Phase 3). Null means the project has no folder
+  // yet: either it predates this feature, or the folder was never created.
+  // Deliberately nullable and never backfilled - existing projects are left
+  // exactly as they are, and a later migration can attach them if the user asks.
+  folderName String?
+  folderPath String?
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
@@ -871,4 +877,23 @@ model Attachment {
   @@index([projectId])
   @@index([recordType, recordId])
   @@map("attachments")
+}
+
+// ---------------------------------------------------------------------------
+// Application settings
+// ---------------------------------------------------------------------------
+
+/// Application-wide configuration the user manages from the Settings page.
+///
+/// This is deliberately NOT project data: it has no projectId, is not cascaded
+/// by anything, and is not part of any project export. Project Hub only ever
+/// reads a fixed, known set of keys, so a plain key/value table is enough -
+/// there is no need for a settings schema, a key registry table, or a generic
+/// "any key" API surface. Unknown keys are ignored by the application.
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("app_settings")
 }

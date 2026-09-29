@@ -136,3 +136,30 @@ export interface ResourceRow {
   id: number;
   [key: string]: unknown;
 }
+
+/**
+ * The Projects Root: the folder that will contain every project folder Project
+ * Hub manages. `null` in the nullable fields means "not configured" or "not
+ * tested yet" - see `writableTested` for the one that is genuinely untested.
+ */
+export interface ProjectsRoot {
+  configured: boolean;
+  key: string;
+  path: string | null;
+  updatedAt: string | null;
+  exists: boolean | null;
+  isDirectory: boolean | null;
+  isSymbolicLink: boolean | null;
+  readable: boolean | null;
+  writable: boolean | null;
+  writableTested: boolean;
+  usable: boolean;
+  problems: PathProblem[];
+  checkedAt: string;
+}
+
+export interface PathProblem {
+  code: string;
+  message: string;
+  possibleAction?: string;
+}
