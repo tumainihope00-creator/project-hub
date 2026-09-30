@@ -1461,3 +1461,390 @@ contains the Project Hub repository itself. If it is set as the Projects Root,
 Phase 3 would treat `p-hub` as a managed project folder. A dedicated folder such
 as `C:\Users\ILGRIS\Desktop\projects\workspaces` avoids that. Nothing is
 configured yet, so this can still be decided before Phase 3 creates anything.
+
+---
+
+# PART III - PHASE 3: PROJECT WORKSPACE FOLDERS (IMPLEMENTED)
+
+Part I is the audit. Part II recorded Phase 2 (the Projects Root setting). This
+part records Phase 3: creating a project now also creates its physical workspace
+folder, and the two are kept consistent. Current source, not this document, is
+authoritative.
+
+**A note on numbering.** Part I §18 proposed a 16-phase plan in which "Phase 3"
+meant *test database isolation* and folders were Phase 5. The plan actually
+executed renamed those: Part II delivered the audit's Phase 4 as "Phase 2". This
+phase therefore corresponds to the **creation half of the audit's Phase 5**, and
+the two pieces of test isolation it assumes are still outstanding - see P3.12 and
+P3.14.
+
+## P3.1 Objective and scope
+
+Phase 3 delivered one thing: when Project Hub creates a project, it also creates
+that project's workspace folder under the configured Projects Root, and the
+database record and the folder are either both there or neither is.
+
+In scope: folder creation at project creation, folder-name derivation,
+containment checking, collision refusal, rollback, a preview endpoint, a
+workspace status endpoint, and the UI that makes both visible before and after
+creation.
+
+Explicitly **not** in scope and not implemented: `PROJECT.md` rendering,
+`STATUS.md`, any two-way synchronisation, filesystem watching, adopting a
+folder that already exists, moving or renaming a folder when a project is
+renamed, opening a folder in Explorer or an editor, and any lifecycle or stage
+automation.
+
+## P3.2 Database changes
+
+One additive migration, `20260929220000_project_workspace`, and nothing else:
+
+```sql
+ALTER TABLE "projects"
+  ADD COLUMN "folderName" TEXT,
+  ADD COLUMN "folderPath" TEXT;
+
+CREATE INDEX "projects_folderPath_idx" ON "projects"("folderPath");
+```
+
+Both columns are nullable and **nothing is backfilled**. The eight existing
+projects keep `folder_path = NULL`, which the application already reads as "this
+project has no workspace". Verified after the fact: `projects with folderPath = 0`.
+A later phase can attach existing folders if the user asks for it; this phase
+never invents a folder for a project it did not create.
+
+`npx prisma migrate status` reports 5 migrations and "Database schema is up to
+date!". No existing table, row, constraint or relationship was altered.
+
+## P3.3 The ordering decision, which is the whole design
+
+```
+validate name -> load Projects Root -> derive a safe folder name ->
+containment check -> collision check -> mkdir -> INSERT project row
+```
+
+The folder is created **before** the record, not after. The reasoning: the two
+cannot share a transaction, so one of them will eventually fail alone. If the
+record is written first and the folder then fails, the database holds a project
+that claims a workspace which does not exist - and the user has no way to tell
+that from a healthy project. If the folder is created first and the record then
+fails, the visible state is an empty folder the user can see and delete, which is
+the recoverable direction.
+
+The rollback is deliberately narrow
+(`backend/src/lib/projectCreation.ts:182-204`):
+
+- It only ever removes a folder **this call created**. `createdByUs` is a local
+  variable set by the `mkdir` itself (`projectWorkspace.ts:246-264`), so it can
+  never be true for a folder that already existed.
+- It uses `rmdir`, never a recursive delete. If anything at all is inside the
+  folder - a file the user dropped in, a git repository someone initialised - the
+  removal fails and is **reported**, not forced.
+- If the removal fails, the user gets a `500` whose message names the surviving
+  path, the reason cleanup was refused, and the original database error, with
+  `details.code = 'PARTIAL_STATE_FOLDER_LEFT'`. A folder the user can see but
+  that no project points at is a real state, and it is stated rather than hidden.
+- A lost race (folder created by something else between the check and the
+  `mkdir`) is re-inspected and reported as the same collision, so a folder this
+  call did not create is never adopted.
+
+## P3.4 Folder names are derived from the display name, never from the slug
+
+Part I §8.3(c) warned specifically against deriving folder names from slugs
+(80 characters, `[a-z0-9-]` only, `-2` suffixes, two different length limits in
+two creation paths). The slug is not used here at all.
+`toSafeFolderName()` (`projectWorkspace.ts:73-122`) works from the project name:
+
+| Input | Folder name | Note |
+| --- | --- | --- |
+| `NODIA` | `NODIA` | unchanged |
+| `My Trading Bot V2` | `My Trading Bot V2` | spaces are legal and kept |
+| `My Trading Bot: V2` | `My Trading Bot- V2` | `:` replaced |
+| `a<b>c\|d?e*f"g` | `a-b-c-d-e-f-g` | each illegal character replaced |
+| `NUL.txt` | `NUL-project.txt` | suffix goes **before** the extension |
+| `trailing dots...` | `trailing dots` | Windows strips these silently |
+| `C:\Windows\System32` | `C-Windows-System32` | separators cannot survive |
+| `///` | *rejected, 400* | nothing usable remains |
+
+Two deliberate properties:
+
+- **The display name is never rewritten.** `projects.name` stays exactly what
+  the user typed. Only the folder is made safe, and when the two differ the API
+  returns `renamed: true` so the UI can say so rather than surprise the user with
+  a directory on disk.
+- **No invented alternatives.** A name that collides is refused with a 409. There
+  is no `NODIA2`, no timestamp suffix, no numeric fallback. Part I §11.3 called
+  out silent renaming as the failure mode to avoid, and it is avoided.
+
+Windows device names are matched on the stem before the first dot,
+case-insensitively, because `NUL.txt` is still a device to Windows. The `-project`
+suffix is inserted before the extension for exactly that reason; appending it
+would leave `NUL.txt-project`, whose stem is still `nul`.
+
+`MAX_FOLDER_NAME` is 100 characters, bounded well inside the 260-character
+classic Windows path budget, and truncation prefers a word boundary.
+
+## P3.5 Containment is checked on path segments, not on string prefixes
+
+`isInsideRoot()` (`projectWorkspace.ts:132-149`) resolves both sides, splits them
+into segments, requires the target to be strictly deeper than the root, and
+compares segment by segment - case-insensitively on Windows, because
+`D:\projects` and `D:\Projects` are the same directory. A string prefix check
+would accept `D:\ProjectsOther` as being inside `D:\Projects`; the tests assert
+it does not. The root itself is not "inside" the root.
+
+This runs on every creation, and the tests then assert the stronger property: for
+each of nine hostile names including `..`, `../../../../Windows`,
+`C:\Windows\System32`, `\\server\share\evil` and `/etc/passwd`, the parent
+directory of whatever path is produced is exactly the resolved Projects Root, and
+nothing appeared in the OS temp folder next to it.
+
+## P3.6 Pre-existing folders are never claimed and never deleted
+
+`inspectTarget()` (`projectWorkspace.ts:191-227`) looks before touching anything
+and returns one of four collision kinds, each with its own explanation and
+suggested action:
+
+| Kind | Meaning |
+| --- | --- |
+| `exists` | a directory is already there - refused, not adopted, not emptied |
+| `file` | a file occupies the path - refused |
+| `symlink` | a link (including a junction) occupies the path - refused, never followed |
+| `unreadable` | the path could not be checked at all - refused with a permissions message |
+
+Refusal is a `409` with `category: 'CONFLICT'` and
+`details.code: 'WORKSPACE_ALREADY_EXISTS'`. A test creates a folder containing
+`precious.txt`, attempts to create a project of the same name, and then asserts
+the file's contents, the folder's listing, and the absence of any project row.
+The same test proves no `NODIA2`-style alternative appears beside it.
+
+This is a deliberate narrowing of the audit's Phase 5, which proposed an explicit
+*adopt* endpoint for an existing empty folder. Adoption is genuinely useful, but
+it is a separate user decision - "this folder is mine, use it" - and shipping it
+in the same phase as automatic creation would have made the dangerous path the
+easy one. It remains open (P3.16).
+
+## P3.7 No Projects Root means no project
+
+`requireUsableProjectsRoot()` (`projectCreation.ts:55-89`) refuses creation when
+the setting is missing, when the folder no longer exists, when it is a file, or
+when it cannot be read. There is **no fallback** - not the working directory, not
+the repository, not the home directory. Writing project folders somewhere the user
+did not choose is worse than refusing to create the project, so the API returns
+`409` with `PROJECTS_ROOT_NOT_CONFIGURED` or `PROJECTS_ROOT_UNUSABLE` and a
+`possibleAction` that names Settings.
+
+The trade-off is real and worth stating: **project creation now depends on
+filesystem state.** A user who has not configured a Projects Root cannot create
+projects at all, including through a path that previously worked. This is a
+deliberate consequence of the ordering in P3.3, not an oversight, and it is the
+single most likely thing to surprise a returning user.
+
+## P3.8 A folder is not development activity
+
+The create route now hard-codes `stage: 'IDEA'` (`projects.ts:181`) and the
+creation form no longer offers a stage selector (`PROJECT_CREATE_CONFIG` in
+`frontend/src/projectConfig.ts`). Part I §10.5 recorded the requirement that
+`BUILDING` must be gated on evidence and that "a project-folder creation event
+must never be sufficient on its own". Creating a folder is not evidence of
+anything, so it cannot move a project. A test asserts `stage === 'IDEA'` on
+creation.
+
+A gap remains: the field is still **accepted and silently discarded**. See
+P3.16.
+
+## P3.9 API surface
+
+| Method | Path | Effect |
+| --- | --- | --- |
+| POST | `/api/projects` | unchanged shape; now also creates the folder and stores `folderName`/`folderPath` |
+| POST | `/api/projects/preview-workspace` | resolves a name to the folder it *would* use; creates nothing |
+| GET | `/api/projects/:key/workspace` | reports whether the folder is still on disk |
+
+`preview-workspace` runs the identical validation, derivation and collision check
+as real creation, so what the UI promises is what happens. A test asserts the
+previewed path equals the created path, and that a preview of a colliding name
+returns the same 409 the create would.
+
+`GET /:key/workspace` returns `{ hasWorkspace, folderPath, folderName, exists,
+isDirectory, readable, problems, checkedAt }`, or `hasWorkspace: false` for a
+project that never had one. The advice attached to a `PATH_NOT_FOUND` finding is
+rewritten for this context: the Settings page owns the "Create folder" button for
+the Projects Root, and pointing a project user at a control that does not exist
+would be a dead end, so the message instead says the folder was deleted outside
+Project Hub and that nothing in the project record was lost.
+
+Two new error categories were added in `backend/src/lib/errors.ts`: `CONFLICT`
+(an existing folder is a decision the user must make) and `FILESYSTEM_ERROR` (a
+refusal by the operating system is neither a bad request nor a plain system
+fault). Every new failure carries a machine-readable `details.code` and a
+`possibleAction` written for a human.
+
+## P3.10 Frontend
+
+- **Before committing**, the create modal shows the exact absolute path the
+  folder will be created at, under which Projects Root, and states that the
+  folder is created empty - no `PROJECT.md`, no `STATUS.md`. If the folder name
+  had to differ from the project name, it says which name was changed and why the
+  project keeps yours. A collision or a bad name is shown as an error that blocks
+  creation. The preview is debounced by 300 ms and driven by a new optional
+  `onValuesChange` prop on `ResourceForm`, so the server stays the only authority
+  on what the folder will be called.
+- **After creating**, the user is taken straight to the new project instead of
+  back to a list, and the toast names the workspace that was created.
+- **The project page** gained a Workspace card on the overview showing the path
+  and three checks - exists, is a folder, readable - with the underlying
+  problems listed if any. A project with no folder says so and explains why
+  (predates the feature, or came from the importer).
+
+There is deliberately **no "Open folder" button**, in the same way Phase 2 had no
+folder picker. A page served over HTTP has no standard way to open a local
+directory in the operating system's file manager: the File System Access API is
+permission-gated and not universally available, and `<input webkitdirectory>`
+returns a list of files rather than a path Project Hub can manage. Shipping a
+button that silently does nothing would be worse than showing the path and
+letting the user copy it. The reasoning is recorded in the component rather than
+left as an unexplained absence. Editor integration remains a later phase.
+
+## P3.11 Verification performed
+
+| Check | Result |
+| --- | --- |
+| `npx vitest run tests/projectWorkspace.test.ts` | **44/44 passed** (977 ms) |
+| `npx vitest run` (whole suite) | **164/164 passed**, 5 files, 16.52s |
+| `npx tsc -p tsconfig.json --noEmit` (backend) | clean |
+| `npx tsc -b && vite build` (frontend) | clean, built in 3.23s |
+| `npx prisma migrate status` | 5 migrations, schema up to date |
+| Live database fingerprint, before and after the full suite | **byte-identical** |
+| `projects with folderPath` | 0 - no backfill happened |
+| `app_settings` rows after the run | 0 - the Projects Root is still unconfigured |
+| Temp directories left behind | none |
+
+The 44 new tests cover: record and folder created together and linked; the
+folder starting empty; verbatim names with spaces; two projects staying
+independent; optional fields surviving; a missing Projects Root and a deleted
+Projects Root both refused with nothing written; empty and unusable names
+refused; nine hostile names never escaping the root; segment-level containment
+including the prefix-sibling and case-folding cases; a pre-existing folder, an
+empty pre-existing folder, a file in the way and a symlink in the way all
+refused with the original contents intact; no invented alternative name; clean
+rollback on database failure; never removing a folder the call did not create;
+the partial-state report when cleanup is blocked; pre-existing projects
+byte-identical and never backfilled; reserved device names, illegal characters,
+trailing dots, over-long names and names with nothing usable; display name
+preserved while the folder is transformed; the three preview cases; the four
+status cases; and preview/create parity.
+
+**A correction to Part I.** §1, §16 and §18 state "82 test declarations". The
+real pre-existing count is **120** (19 `api` + 27 `promptGenerator` + 36
+`import` + 38 `projectsRoot`). With this phase's 44 the suite is 164. The Part I
+figure undercounted and should not be relied on.
+
+## P3.12 A regression this phase introduced, and the fix
+
+Requiring a usable Projects Root broke the existing test suite, and the phase
+shipped without noticing.
+
+`tests/helpers.ts:16` `createProject()` posts to `POST /api/projects`, which now
+returns `409 PROJECTS_ROOT_NOT_CONFIGURED`, and the helper throws. `api.test.ts`
+and `promptGenerator.test.ts` both create their fixture project in `beforeAll`,
+so **46 of the 120 pre-existing tests could not run at all**:
+
+```
+FAIL tests/api.test.ts  19 tests | 19 skipped
+Error: Failed to create test project (409) ... PROJECTS_ROOT_NOT_CONFIGURED
+```
+
+Nothing in `tests/setup.ts` configured a Projects Root, so the fix belongs there.
+`tests/setup.ts` now creates one `fs.mkdtemp` directory per test file under the
+OS temp folder, stores it as the Projects Root for the duration of the file, and
+in `afterAll` **restores whatever value was configured before** - including
+deleting the row when there was none - before removing the directory. The
+setting is saved and restored rather than assumed empty so that running the suite
+against a configured installation cannot silently discard the user's Projects
+Root. `projectWorkspace.test.ts` and `projectsRoot.test.ts`, which manage their
+own roots, are unaffected: they override the setting in their own hooks and clear
+it again, and their own `afterAll` assertions still hold because the setup's
+`afterAll` runs last.
+
+With that change the full suite is green, and the before/after database
+fingerprint is identical: same 8 projects, same 22 child-table counts, same 202
+activity events, same 25 tag assignments, identical `createdAt`/`updatedAt` on
+every project row.
+
+## P3.13 Database and filesystem safety
+
+- The only schema change is two nullable columns and one index. No rewrite, no
+  backfill, no constraint change, no touch to any existing row.
+- No filesystem test ever used the user's real Projects Root. Every directory
+  came from `fs.mkdtemp` under the OS temp folder, and every one was removed.
+- Pre-existing projects are asserted unchanged by fingerprint inside the suite
+  itself, so the claim is a test rather than a promise.
+- The only writes in the whole phase are: one `mkdir` for a new project, and
+  `rmdir` for a rollback of a folder this call created and that is still empty.
+
+## P3.14 Test isolation is still open
+
+Fixing the helper made the suite run again. It did **not** make it safe.
+`backend/tests/*` still load the real `backend/.env`, still point at the live
+`projecthub` database, and `import.test.ts` in particular creates and hard-deletes
+real project rows through the importer. The full-suite run above wrote to the
+live database and cleaned up after itself; the fingerprint proves the cleanup was
+complete, not that the writes were harmless.
+
+This is Part I §18's original "Phase 3" and Part II's P2.11, still outstanding. It
+now has a concrete blocker worth naming: any solution has to give the tests a
+Projects Root that is both real enough for `mkdir` to work and disposable enough
+to be thrown away, and a test schema in the same database satisfies both. Until
+it is done, the safe way to work is what was done here - run the suite, then prove
+with a fingerprint that nothing moved.
+
+## P3.15 Known gaps and limitations
+
+1. **`stage` is silently discarded on create.** `projectCreateSchema` still
+   accepts `stage` (`projects.ts:52`, default `'IDEA'`) and the route then
+   overwrites it with `'IDEA'` at `projects.ts:181`. A client sending
+   `{ "name": "x", "stage": "PRODUCTION" }` receives `201` with `stage: "IDEA"`
+   and no indication that its input was dropped. The behaviour is safe; the
+   silence is not. It should either be rejected or documented in the response.
+2. **Renaming a project does not touch its folder.** `PUT /projects/:id`
+   re-slugs the name but leaves `folderName`/`folderPath` alone
+   (`projects.ts:306-309`). This is the safe choice - renaming a user's directory
+   without being asked is worse - but the Workspace card then shows a path that
+   no longer matches the project name with no explanation of why.
+3. **No way to give an existing project a folder.** Pre-existing projects and
+   imported projects have no adopt flow, no backfill, and no "create the folder
+   now" action. The UI states that they have no workspace; it does not offer a
+   way out.
+4. **Imported projects get no folder.** `POST /api/import/create` goes through
+   the importer's own transaction and never touches the workspace code, so a
+   project created from a document starts with `folderPath = null`. This is
+   visible in the UI and is consistent, but it means the two creation paths in
+   the product now behave differently by design.
+5. **`MAX_FOLDER_NAME` is 100 characters and path length is not otherwise
+   bounded**, so the classic Windows 260-character `MAX_PATH` limit is still not
+   handled (carried from P2.12).
+6. **Scratch files were left in the repository**: `backend/manual-verify.mjs`
+   and `backend/manual-root.txt` are untracked, and an empty
+   `%TEMP%\ph-manual-dfd5004a` directory remains. The verification script's step
+   7 also reads a `present` field the API does not return (it returns `exists`
+   and `isDirectory`), so that step's output was `undefined`. None of this
+   affects the application; all of it should be deleted before the next commit.
+   Phase 2's equivalent script was deleted after use.
+7. **`frontend/tsconfig.tsbuildinfo` is tracked** and shows as modified after
+   every build. It is a build artefact in version control and should be ignored.
+
+## P3.16 Open decisions for the user
+
+- **Which Projects Root.** Nothing is configured. The suggested
+  `C:\Users\ILGRIS\Desktop\projects` contains the Project Hub repository itself,
+  so `p-hub` would become a managed project folder; a dedicated
+  `C:\Users\ILGRIS\Desktop\projects\workspaces` avoids that. Project creation is
+  refused until this is set.
+- **Adopting existing folders.** The Phase 3 refusal is permanent by design.
+  Whether a later phase should offer an explicit "use this folder" action, and
+  whether it should be limited to empty folders, is a decision for you.
+- **Renaming.** Whether a project rename should offer to rename the folder, or
+  leave the folder alone and simply explain the mismatch in the UI.
+- **What comes next.** `PROJECT.md` generation is the natural follow-on and is
+  the first feature that would put content into these folders.

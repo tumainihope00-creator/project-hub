@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, qs, relativeTime } from '../api/client';
 import { useApi } from '../lib/useApi';
 import { useApp } from '../context/AppContext';
@@ -7,11 +7,12 @@ import { ConfirmButton, EmptyState, Loading, Modal, StageBadge } from '../compon
 import { ResourceForm, type FormValues } from '../components/ResourceForm';
 import { DocumentImportWizard } from '../components/DocumentImportWizard';
 import { STAGES, humanize } from '../resources';
-import { PROJECT_CONFIG } from '../projectConfig';
-import type { FullProject, ProjectSummary } from '../api/types';
+import { PROJECT_CONFIG, PROJECT_CREATE_CONFIG } from '../projectConfig';
+import type { FullProject, ProjectSummary, WorkspacePreview } from '../api/types';
 
 export function Portfolio() {
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
   const { tags: globalTags, toast, reloadTags, reloadProjects } = useApp();
   const [q, setQ] = useState('');
   const [stage, setStage] = useState('');
@@ -20,11 +21,52 @@ export function Portfolio() {
   const [mode, setMode] = useState<'manual' | 'import' | null>(null);
   const [editing, setEditing] = useState<FullProject | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [draftName, setDraftName] = useState('');
+  const [preview, setPreview] = useState<WorkspacePreview | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const closeNew = () => {
     setCreating(false);
     setMode(null);
+    setDraftName('');
+    setPreview(null);
+    setPreviewError(null);
   };
+
+  /**
+   * Ask the backend what folder the current name would use.
+   *
+   * The server is the only authority on the resolved folder name, the folder
+   * name's safety, and whether the folder already exists, so the preview calls
+   * the same validation real creation uses instead of guessing in the browser.
+   */
+  useEffect(() => {
+    const name = draftName.trim();
+    if (mode !== 'manual' || !name) {
+      setPreview(null);
+      setPreviewError(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await api.post<WorkspacePreview>('/projects/preview-workspace', { name });
+        if (!cancelled) {
+          setPreview(res.data);
+          setPreviewError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setPreview(null);
+          setPreviewError(err instanceof Error ? err.message : String(err));
+        }
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [draftName, mode]);
 
   const path = `/projects${qs({ q: q || undefined, stage: stage || undefined, archived })}`;
   const { data, loading, reload } = useApi<ProjectSummary[]>(path);
@@ -49,10 +91,18 @@ export function Portfolio() {
   };
 
   const create = async (values: FormValues, tags: string[]) => {
-    await api.post('/projects', { ...values, tags });
-    toast('Project created');
+    const res = await api.post<FullProject>('/projects', { ...values, tags });
+    const project = res.data;
+    toast(
+      project.folderPath
+        ? `Project created with workspace ${project.folderName}`
+        : 'Project created'
+    );
     closeNew();
     afterWrite();
+    // Open the project the user just made, rather than dropping them back on a
+    // list they now have to find the new row in.
+    navigate(`/projects/${project.slug}`);
   };
 
   const update = async (id: number, values: FormValues, tags: string[]) => {
@@ -207,14 +257,15 @@ export function Portfolio() {
 
       {mode === 'manual' ? (
         <Modal title="New Project" onClose={closeNew} wide>
+          <NewProjectNotice preview={preview} error={previewError} />
           <ResourceForm
-            config={PROJECT_CONFIG}
+            config={PROJECT_CREATE_CONFIG}
             projectId={0}
-            initial={{ stage: 'IDEA' }}
             tagSuggestions={tagSuggestions}
             submitLabel="Create project"
             onCancel={closeNew}
             onSubmit={create}
+            onValuesChange={values => setDraftName(String(values.name ?? ''))}
           />
         </Modal>
       ) : null}
@@ -245,6 +296,64 @@ export function Portfolio() {
             Original idea captured at creation is preserved separately and never overwritten.
           </div>
         </Modal>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Tells the user, before they commit, that a folder will be created for them and
+ * exactly where. If the folder name had to differ from the project name, that is
+ * stated plainly rather than being a surprise on disk.
+ */
+function NewProjectNotice({
+  preview,
+  error
+}: {
+  preview: WorkspacePreview | null;
+  error: string | null;
+}) {
+  if (error) {
+    return (
+      <div
+        className="card"
+        style={{ borderColor: 'var(--red)', marginBottom: 12, display: 'flex', gap: 8, alignItems: 'flex-start' }}
+      >
+        <span style={{ color: 'var(--red)' }}>✗</span>
+        <div>
+          <div style={{ color: 'var(--red)' }}>{error}</div>
+          <div className="tiny dim" style={{ marginTop: 2 }}>
+            The project cannot be created until this is resolved.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!preview) {
+    return (
+      <div className="card dim" style={{ marginBottom: 12 }}>
+        Enter a project name. A workspace folder will be created for it under your configured Projects Root.
+      </div>
+    );
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 12, borderColor: 'var(--accent)' }}>
+      <div className="tiny dim">A project workspace will be created at</div>
+      <div className="mono" style={{ fontSize: 14, wordBreak: 'break-all', margin: '4px 0' }}>
+        {preview.folderPath}
+      </div>
+      <div className="tiny dim">
+        under Projects Root <span className="mono">{preview.root}</span>. The folder is created empty: no PROJECT.md, no
+        STATUS.md, no files are added yet.
+      </div>
+      {preview.renamed ? (
+        <div className="tiny" style={{ color: 'var(--yellow)', marginTop: 6 }}>
+          The project keeps your name exactly as typed. The folder is named{' '}
+          <span className="mono">{preview.folderName}</span> because the characters in the project name are not
+          allowed in a folder name.
+        </div>
       ) : null}
     </div>
   );

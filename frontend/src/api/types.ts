@@ -54,6 +54,31 @@ export interface FullProject extends ProjectSummary {
   v1Scope?: string | null;
   originalIdea?: string | null;
   repositoryUrl?: string | null;
+  /**
+   * Phase 3 physical workspace. Null means the project has no folder: either it
+   * predates the feature, or it came from the document importer.
+   */
+  folderName?: string | null;
+  folderPath?: string | null;
+}
+
+export interface WorkspacePreview {
+  root: string;
+  folderName: string;
+  folderPath: string;
+  renamed: boolean;
+  willCreate: boolean;
+}
+
+export interface WorkspaceStatus {
+  hasWorkspace: boolean;
+  folderPath: string | null;
+  folderName: string | null;
+  exists?: boolean | null;
+  isDirectory?: boolean | null;
+  readable?: boolean | null;
+  problems?: PathProblem[];
+  checkedAt?: string;
 }
 
 export interface ProjectRelationship {

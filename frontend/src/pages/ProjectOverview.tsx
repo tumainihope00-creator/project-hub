@@ -4,11 +4,83 @@ import { useProject } from '../context/ProjectContext';
 import { Loading, ProgressBar, TimeAgo, EmptyState, Badge } from '../components/ui';
 import { humanize } from '../resources';
 import { statusColor } from '../lib/status';
-import type { ProjectOverview } from '../api/types';
+import type { ProjectOverview as ProjectOverviewData, WorkspaceStatus } from '../api/types';
+
+function Check({ ok, label }: { ok: boolean | null | undefined; label: string }) {
+  if (ok === null || ok === undefined) return <span className="dim">{label}</span>;
+  return (
+    <span>
+      <span style={{ color: ok ? 'var(--green)' : 'var(--red)', marginRight: 6 }}>{ok ? '✓' : '✗'}</span>
+      {label}
+    </span>
+  );
+}
+
+/**
+ * Shows the project's physical workspace and whether it is still on disk.
+ *
+ * There is deliberately no "Open folder" button. Project Hub is a browser app
+ * and the web platform gives a page no way to open a local directory in the
+ * operating system's file manager - the File System Access API is
+ * permission-gated, not universally supported, and would be a dead button
+ * everywhere else. The path is shown and can be copied instead, which is honest
+ * about what the architecture can actually do. VS Code integration is a later
+ * phase.
+ */
+function WorkspaceCard() {
+  const { project } = useProject();
+  const { data } = useApi<WorkspaceStatus>(`/projects/${project.id}/workspace`);
+
+  if (!project.folderPath) {
+    return (
+      <div className="card dim">
+        This project has no workspace folder. Projects created before workspace folders existed, and projects created
+        from an imported document, do not have one.
+      </div>
+    );
+  }
+
+  const present = data?.exists === true && data?.isDirectory === true;
+
+  return (
+    <div className="card">
+      <div className="tiny dim">Workspace</div>
+      <div className="mono" style={{ fontSize: 14, wordBreak: 'break-all', margin: '4px 0 8px' }}>
+        {project.folderPath}
+      </div>
+      <dl className="kv" style={{ margin: 0 }}>
+        <dt>Folder</dt>
+        <dd>
+          <Check ok={data?.exists} label={data?.exists === true ? 'Exists on disk' : data?.exists === false ? 'Missing from disk' : 'Checking…'} />
+        </dd>
+        <dt>Is a folder</dt>
+        <dd>
+          <Check ok={data?.isDirectory} label={data?.isDirectory === true ? 'Yes' : data?.isDirectory === false ? 'No' : 'Checking…'} />
+        </dd>
+        <dt>Readable</dt>
+        <dd>
+          <Check ok={data?.readable} label={data?.readable === true ? 'Yes' : data?.readable === false ? 'No' : 'Checking…'} />
+        </dd>
+      </dl>
+      {present ? (
+        <div className="tiny dim" style={{ marginTop: 10 }}>
+          Open the folder in your file manager or editor. Project Hub cannot launch it from the browser.
+        </div>
+      ) : null}
+      {data?.problems?.length ? (
+        <div className="tiny" style={{ color: 'var(--yellow)', marginTop: 8 }}>
+          {data.problems.map((p, i) => (
+            <div key={i}>{p.message}</div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 export function ProjectOverview() {
   const { project } = useProject();
-  const { data, loading } = useApi<ProjectOverview>(`/projects/${project.id}/overview`);
+  const { data, loading } = useApi<ProjectOverviewData>(`/projects/${project.id}/overview`);
   const { data: heat } = useApi<{ start: string; days: { date: string; count: number }[] }>(`/projects/${project.id}/heatmap`);
 
   if (loading && !data) return <div className="page"><Loading /></div>;
@@ -73,6 +145,9 @@ export function ProjectOverview() {
           <div className="hint">{stats.decisions} decisions logged</div>
         </div>
       </div>
+
+      <h2 className="section">Workspace</h2>
+      <WorkspaceCard />
 
       <div className="grid c2" style={{ marginTop: 16 }}>
         <div>

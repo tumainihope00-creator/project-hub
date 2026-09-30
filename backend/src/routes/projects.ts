@@ -6,6 +6,8 @@ import { logActivity } from '../lib/activity.js';
 import { projectStats, STAGE_ORDER } from '../lib/projectStats.js';
 import { setTags, tagsFor } from '../lib/tags.js';
 import { intFromQuery } from '../lib/validation.js';
+import { createProjectWithWorkspace, prepareProjectWorkspace } from '../lib/projectCreation.js';
+import { probeProjectsRoot, type PathProblem } from '../lib/paths.js';
 import { STAGES } from '../resources.js';
 
 const router = Router();
@@ -164,9 +166,27 @@ router.post('/', async (req, res, next) => {
       inspiration: data.inspiration ?? null,
       capturedAt: new Date().toISOString()
     });
-    const project = await prisma.project.create({
-      data: { ...data, slug, originalIdea, isArchived: false }
-    });
+
+    // Phase 3: the folder is created first, then the record. If the record fails
+    // the folder is removed again, and only if this call created it and it is
+    // still empty. See lib/projectCreation.ts for why the order is that way.
+    const { project } = await createProjectWithWorkspace(
+      { name: data.name },
+      ({ folderName, folderPath }) =>
+        prisma.project.create({
+          data: {
+            ...data,
+            // A new project always starts at IDEA. Creating a folder is not
+            // development activity, and lifecycle detection is a later phase.
+            stage: 'IDEA',
+            slug,
+            originalIdea,
+            isArchived: false,
+            folderName,
+            folderPath
+          }
+        })
+    );
     if (Array.isArray(tags) && tags.length) {
       await setTags('project', project.id, tags);
     }
@@ -178,6 +198,85 @@ router.post('/', async (req, res, next) => {
       relatedId: project.id
     });
     res.status(201).json({ data: project });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// --------------------------------------------------------------------------
+// Workspace preview / status (Phase 3)
+// --------------------------------------------------------------------------
+
+/**
+ * Resolve a project name to the folder it would use, without creating anything.
+ *
+ * Exists so the creation UI can show "a workspace will be created at ..." before
+ * the user commits, and so they can see the folder name when it had to differ
+ * from their project name. This performs the same validation and the same
+ * collision check as real creation, so what it promises is what will happen.
+ */
+router.post('/preview-workspace', async (req, res, next) => {
+  try {
+    const parsed = z.object({ name: z.string() }).strict().safeParse(req.body);
+    if (!parsed.success) throw badRequest('Invalid input', parsed.error.flatten());
+    const preview = await prepareProjectWorkspace(parsed.data.name);
+    res.json({
+      data: {
+        ...preview,
+        willCreate: true
+      }
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * `probeProjectsRoot` produces problems written for the Settings page, where a
+ * "Create folder" button exists for the Projects Root itself. A project
+ * workspace has no such control - Phase 3 deliberately does not create folders
+ * on demand - so the advice is rewritten for the context the user is in.
+ */
+function workspaceProblems(problems: PathProblem[]): PathProblem[] {
+  return problems.map(p => ({
+    ...p,
+    possibleAction:
+      p.code === 'PATH_NOT_FOUND'
+        ? 'This folder was deleted outside Project Hub. Recreate it at this exact path if you still need the workspace - nothing in the project record was lost.'
+        : p.code === 'PATH_NOT_DIRECTORY'
+          ? 'A file is sitting where this project folder should be. Project Hub will not replace it; move it aside yourself.'
+          : p.possibleAction
+  }));
+}
+
+/**
+ * Report whether a project's workspace folder is still on disk.
+ *
+ * A browser page cannot open a local folder in the operating system's file
+ * manager - there is no standard API for it, and the File System Access API is
+ * permission-gated and not universally available. Rather than ship a button
+ * that silently does nothing, the details page uses this to tell the truth about
+ * the workspace and lets the user copy the path.
+ */
+router.get('/:key/workspace', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    if (!project.folderPath) {
+      return res.json({ data: { hasWorkspace: false, folderPath: null, folderName: null, exists: null, isDirectory: null } });
+    }
+    const probe = await probeProjectsRoot(project.folderPath, { testWrite: false });
+    res.json({
+      data: {
+        hasWorkspace: true,
+        folderPath: project.folderPath,
+        folderName: project.folderName,
+        exists: probe.exists,
+        isDirectory: probe.isDirectory,
+        readable: probe.readable,
+        problems: workspaceProblems(probe.problems),
+        checkedAt: probe.checkedAt
+      }
+    });
   } catch (e) {
     next(e);
   }

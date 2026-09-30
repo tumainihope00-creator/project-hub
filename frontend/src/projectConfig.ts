@@ -25,3 +25,20 @@ export const PROJECT_CONFIG: ResourceConfig = {
   ],
   columns: []
 };
+
+/**
+ * The creation form (Phase 3).
+ *
+ * Identical to PROJECT_CONFIG except that `stage` is not offered. A new project
+ * always starts at IDEA on the server, and offering a stage selector that the
+ * server would override would be a control that lies. The stage is one click
+ * away in Project Settings right after creation.
+ *
+ * `name` stays the only required field. Everything else is optional and the form
+ * must never block creation on them: a project can be enriched later through
+ * Project Hub, PROJECT.md, or the importer.
+ */
+export const PROJECT_CREATE_CONFIG: ResourceConfig = {
+  ...PROJECT_CONFIG,
+  fields: PROJECT_CONFIG.fields.filter(f => f.name !== 'stage')
+};

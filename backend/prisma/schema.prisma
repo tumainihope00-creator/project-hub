@@ -293,6 +293,7 @@ model Project {
   @@index([stage])
   @@index([isArchived])
   @@index([updatedAt])
+  @@index([folderPath])
   @@map("projects")
 }
 

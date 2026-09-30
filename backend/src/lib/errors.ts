@@ -29,7 +29,12 @@ export type ErrorCategory =
   | 'DOCUMENT_ERROR'
   | 'EXTRACTION_ERROR'
   | 'MAPPING_ERROR'
-  | 'DATABASE_ERROR';
+  | 'DATABASE_ERROR'
+  // Phase 3. A workspace folder that already exists is a conflict the user must
+  // resolve, not a validation slip, and a filesystem refusal (permissions, a
+  // read-only volume) is neither a bad request nor a plain system fault.
+  | 'CONFLICT'
+  | 'FILESYSTEM_ERROR';
 
 export interface ApiErrorBody {
   message: string;

@@ -44,7 +44,8 @@ export function ResourceForm({
   onSubmit,
   onCancel,
   submitLabel = 'Save',
-  tagSuggestions = []
+  tagSuggestions = [],
+  onValuesChange
 }: {
   config: ResourceConfig;
   projectId: number;
@@ -53,6 +54,8 @@ export function ResourceForm({
   onCancel: () => void;
   submitLabel?: string;
   tagSuggestions?: string[];
+  /** Notified whenever a field changes, so a parent can react live. */
+  onValuesChange?: (values: FormValues) => void;
 }) {
   const [values, setValues] = useState<FormValues>(() => {
     const v: FormValues = {};
@@ -96,7 +99,12 @@ export function ResourceForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, config.path]);
 
-  const set = (name: string, value: unknown) => setValues(prev => ({ ...prev, [name]: value }));
+  const set = (name: string, value: unknown) =>
+    setValues(prev => {
+      const next = { ...prev, [name]: value };
+      onValuesChange?.(next);
+      return next;
+    });
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
