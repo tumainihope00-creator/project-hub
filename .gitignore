@@ -6,6 +6,7 @@ dist/
 build/
 .vite/
 coverage/
+*.tsbuildinfo
 
 # Environment (keep the example committed)
 .env
@@ -33,3 +34,11 @@ Thumbs.db
 # Misc
 *.local
 .cache/
+
+# One-off verification scripts and their output (tmp-*.mjs, tmp-*.ts,
+# manual-verify.mjs, manual-root.txt). These are throwaway: each phase writes
+# one, runs it, and deletes it.
+backend/tmp-*
+frontend/tmp-*
+backend/manual-verify.mjs
+backend/manual-root.txt
