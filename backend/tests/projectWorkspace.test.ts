@@ -145,8 +145,9 @@ describe('1-6. creating a project creates a matching folder', () => {
     // 3 and 6. the folder exists at exactly the stored path
     expect((await fsp.stat(project.folderPath)).isDirectory()).toBe(true);
 
-    // and the folder starts empty: no PROJECT.md, no STATUS.md
-    expect(await fsp.readdir(project.folderPath)).toEqual([]);
+    // and the folder holds exactly one file: PROJECT.md, created with the project
+    // by Phase 4. No STATUS.md, no scratch files, nothing else.
+    expect(await fsp.readdir(project.folderPath)).toEqual(['PROJECT.md']);
   });
 
   it('accepts a name with spaces and keeps it verbatim', async () => {
@@ -532,7 +533,9 @@ describe('workspace status endpoint', () => {
 
   it('explains a vanished folder in project terms, not Projects Root terms', async () => {
     const res = await createViaApi('Explaining Workspace');
-    await fsp.rmdir(res.body.data.folderPath);
+    // Recursive, because Phase 4 puts PROJECT.md in the folder, so it is no
+    // longer empty and `rmdir` would fail with ENOTEMPTY.
+    await fsp.rm(res.body.data.folderPath, { recursive: true, force: true });
     const status = await api.get(`/api/projects/${res.body.data.id}/workspace`).expect(200);
     const notFound = status.body.data.problems.find((x: { code: string }) => x.code === 'PATH_NOT_FOUND');
     expect(notFound).toBeDefined();

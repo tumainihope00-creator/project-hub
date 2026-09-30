@@ -20,7 +20,12 @@ export type ApiErrorCategory =
   | 'DOCUMENT_ERROR'
   | 'EXTRACTION_ERROR'
   | 'MAPPING_ERROR'
-  | 'DATABASE_ERROR';
+  | 'DATABASE_ERROR'
+  // Phase 3/4. A file that already exists is a conflict the user must resolve,
+  // and a filesystem refusal (permissions, a read-only volume) is neither a bad
+  // request nor a plain system fault.
+  | 'CONFLICT'
+  | 'FILESYSTEM_ERROR';
 
 export class ApiError extends Error {
   status: number;

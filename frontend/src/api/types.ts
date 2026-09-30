@@ -81,6 +81,58 @@ export interface WorkspaceStatus {
   checkedAt?: string;
 }
 
+/**
+ * Phase 4: PROJECT.md, the living document at the root of the project workspace.
+ *
+ * `available: false` is a normal answer, not a failure. It means this project
+ * cannot have a PROJECT.md right now, and `reason` says why: no Projects Root is
+ * configured, the project has no workspace folder, or the stored path no longer
+ * resolves inside the Projects Root. The project page shows the reason and the
+ * suggested action instead of hiding the card.
+ */
+export type ProjectDocumentReason =
+  | 'PROJECTS_ROOT_NOT_CONFIGURED'
+  | 'PROJECT_WORKSPACE_MISSING'
+  | 'PROJECT_WORKSPACE_UNSAFE'
+  | 'PROJECT_WORKSPACE_NOT_ON_DISK';
+
+export interface ProjectDocumentStatus {
+  projectId: number;
+  projectName: string;
+  available: boolean;
+  reason?: ProjectDocumentReason;
+  message?: string;
+  possibleAction?: string;
+  /** Always relative. The client never supplies, and never needs, a full path. */
+  relativePath: string;
+  documentPath?: string;
+  /** null when the state could not be determined, false when there is no file. */
+  exists: boolean | null;
+  isDirectory: boolean;
+  sizeBytes: number | null;
+  modifiedAt: string | null;
+  workspaceExists: boolean | null;
+  workspaceIsSymbolicLink: boolean;
+  documentVersion: number;
+  /** Phase 4 writes the document from the database and nothing else. */
+  direction: 'DATABASE_TO_DOCUMENT';
+  /** Always false in Phase 4. Edits to the file are never applied to Project Hub. */
+  documentToDatabaseSync: false;
+}
+
+export interface ProjectDocumentContent {
+  projectId: number;
+  projectName: string;
+  relativePath: string;
+  documentPath: string;
+  content: string;
+  sizeBytes: number;
+  modifiedAt: string | null;
+  documentVersion: number;
+  direction: 'DATABASE_TO_DOCUMENT';
+  documentToDatabaseSync: false;
+}
+
 export interface ProjectRelationship {
   id: number;
   fromProjectId: number;

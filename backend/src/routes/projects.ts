@@ -1,12 +1,17 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { badRequest, notFound } from '../lib/errors.js';
+import { badRequest, notFound, ApiError } from '../lib/errors.js';
 import { prisma } from '../lib/prisma.js';
 import { logActivity } from '../lib/activity.js';
 import { projectStats, STAGE_ORDER } from '../lib/projectStats.js';
 import { setTags, tagsFor } from '../lib/tags.js';
 import { intFromQuery } from '../lib/validation.js';
 import { createProjectWithWorkspace, prepareProjectWorkspace } from '../lib/projectCreation.js';
+import {
+  projectDocumentStatus,
+  readProjectDocument,
+  writeProjectDocument
+} from '../lib/projectDocument.js';
 import { probeProjectsRoot, type PathProblem } from '../lib/paths.js';
 import { STAGES } from '../resources.js';
 
@@ -190,6 +195,31 @@ router.post('/', async (req, res, next) => {
     if (Array.isArray(tags) && tags.length) {
       await setTags('project', project.id, tags);
     }
+
+    // Phase 4: PROJECT.md is written last, after the record and its tags exist,
+    // so the document is built from the project as the user just defined it.
+    //
+    // A failure here is NOT rolled back. The folder and the record are both real
+    // and correct at this point; deleting either of them because a single file
+    // could not be written would destroy work that succeeded. The project is
+    // returned as created, with the document reported honestly, and the user can
+    // generate it from the project page.
+    let documentStatus: Awaited<ReturnType<typeof projectDocumentStatus>> | null = null;
+    let documentWarning: { code: string; message: string; possibleAction: string } | undefined;
+    try {
+      const written = await writeProjectDocument(project, { overwrite: false });
+      documentStatus = written.status;
+    } catch (err) {
+      const e = err as ApiError;
+      documentWarning = {
+        code: String((e.details as any)?.code ?? 'PROJECT_DOCUMENT_NOT_CREATED'),
+        message: e.message,
+        possibleAction:
+          e.possibleAction ??
+          'The project and its folder were created. Generate PROJECT.md from the project page when you are ready.'
+      };
+    }
+
     await logActivity({
       projectId: project.id,
       type: 'PROJECT_CREATED',
@@ -197,7 +227,7 @@ router.post('/', async (req, res, next) => {
       relatedType: 'project',
       relatedId: project.id
     });
-    res.status(201).json({ data: project });
+    res.status(201).json({ data: { ...project, projectDocument: documentStatus }, ...(documentWarning ? { warning: documentWarning } : {}) });
   } catch (e) {
     next(e);
   }
@@ -277,6 +307,103 @@ router.get('/:key/workspace', async (req, res, next) => {
         checkedAt: probe.checkedAt
       }
     });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// --------------------------------------------------------------------------
+// PROJECT.md (Phase 4)
+//
+// One direction only: the database writes the document. No endpoint here parses
+// PROJECT.md, and none of them accepts a path, a filename, or any other
+// filesystem input from the client. The file is always
+// <Projects Root>/<project folder>/PROJECT.md, derived from the project record.
+// --------------------------------------------------------------------------
+
+/**
+ * Is this project's PROJECT.md present, and can one be created?
+ *
+ * Answers a question the details page asks on every load, so it must not fail
+ * when the answer is simply "no". A project with no workspace, or one whose
+ * workspace is gone, reports `available: false` with the reason, instead of
+ * turning into an error the page has to special-case.
+ */
+router.get('/:key/project-document', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const status = await projectDocumentStatus(project);
+    res.json({ data: status });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * The document itself, for the read-only viewer.
+ *
+ * Only ever called for a project that has one; the content comes from disk, not
+ * from the database, so a user editing the file in their editor sees their edits.
+ * That is the point - and it is also why nothing in this response is ever
+ * written back.
+ */
+router.get('/:key/project-document/content', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const document = await readProjectDocument(project);
+    res.json({ data: document });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Generate PROJECT.md for a project that does not have one yet.
+ *
+ * This is the explicit action for existing projects - the ones Phase 3 left
+ * alone, and any project whose document was removed or never created. It never
+ * runs on its own for a project that already has a file: `writeProjectDocument`
+ * refuses to overwrite, so calling this twice is a no-op followed by a clear
+ * conflict rather than silent data loss.
+ */
+router.post('/:key/project-document', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const result = await writeProjectDocument(project, { overwrite: false });
+    res.status(201).json({ data: result.status, bytes: result.bytes, replaced: false });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Regenerate: replace PROJECT.md with the version built from the database.
+ *
+ * Separate from generate on purpose. This is the only endpoint that discards
+ * whatever is in the file, and it discards any manual edits along with it, so it
+ * requires an explicit `confirm: true`. A missing confirmation is a 400 that
+ * changes nothing on disk - the client is expected to ask the user first, and
+ * the server does not trust that the client asked.
+ */
+router.post('/:key/project-document/regenerate', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const parsed = z.object({ confirm: z.literal(true) }).strict().safeParse(req.body);
+    if (!parsed.success) {
+      throw badRequest(
+        'Regenerating PROJECT.md replaces the file and discards any manual edits to it, so it needs an explicit confirmation.',
+        { requires: 'confirm: true', received: (req.body ?? {}) }
+      );
+    }
+    const status = await projectDocumentStatus(project);
+    if (status.available && status.exists === false) {
+      // Regenerating something that is not there is just creating it, and it
+      // would be surprising to report a replacement that replaced nothing.
+      const created = await writeProjectDocument(project, { overwrite: false });
+      return res.status(201).json({ data: created.status, bytes: created.bytes, replaced: false });
+    }
+    const result = await writeProjectDocument(project, { overwrite: true });
+    res.json({ data: result.status, bytes: result.bytes, replaced: true });
   } catch (e) {
     next(e);
   }
