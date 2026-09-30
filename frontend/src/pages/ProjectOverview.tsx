@@ -3,6 +3,7 @@ import { useApi } from '../lib/useApi';
 import { useProject } from '../context/ProjectContext';
 import { Loading, ProgressBar, TimeAgo, EmptyState, Badge } from '../components/ui';
 import { ProjectDocumentCard } from '../components/ProjectDocumentCard';
+import { ProjectStatusCard } from '../components/ProjectStatusCard';
 import { humanize } from '../resources';
 import { statusColor } from '../lib/status';
 import type { ProjectOverview as ProjectOverviewData, WorkspaceStatus } from '../api/types';
@@ -149,6 +150,9 @@ export function ProjectOverview() {
 
       <h2 className="section">Workspace</h2>
       <WorkspaceCard />
+
+      <h2 className="section">Project status</h2>
+      <ProjectStatusCard />
 
       <h2 className="section">Project document</h2>
       <ProjectDocumentCard />

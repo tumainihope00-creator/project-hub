@@ -145,9 +145,10 @@ describe('1-6. creating a project creates a matching folder', () => {
     // 3 and 6. the folder exists at exactly the stored path
     expect((await fsp.stat(project.folderPath)).isDirectory()).toBe(true);
 
-    // and the folder holds exactly one file: PROJECT.md, created with the project
-    // by Phase 4. No STATUS.md, no scratch files, nothing else.
-    expect(await fsp.readdir(project.folderPath)).toEqual(['PROJECT.md']);
+    // and the folder holds exactly the two files P-Hub creates with the project:
+    // PROJECT.md (Phase 4) and STATUS.md (Phase 5). Both declare IDEA, and
+    // neither implies the project is being built. No scratch files, no source.
+    expect((await fsp.readdir(project.folderPath)).sort()).toEqual(['PROJECT.md', 'STATUS.md']);
   });
 
   it('accepts a name with spaces and keeps it verbatim', async () => {

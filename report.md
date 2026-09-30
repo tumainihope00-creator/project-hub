@@ -1848,3 +1848,519 @@ with a fingerprint that nothing moved.
   leave the folder alone and simply explain the mismatch in the UI.
 - **What comes next.** `PROJECT.md` generation is the natural follow-on and is
   the first feature that would put content into these folders.
+
+---
+
+# Phase 5 Report - STATUS.md and Project Status Control
+
+## IMPLEMENTATION SUMMARY
+
+Phase 5 adds `STATUS.md`, a lifecycle control file in each project workspace,
+and the endpoints and UI that keep it honest about the project's real status.
+
+The whole phase is built on one decision: **the database is the authority.**
+`STATUS.md` is a written representation of `projects.stage`, nothing more. It is
+created with the project, rewritten when the status changes in Project Hub,
+readable, checkable against the database, and explicitly regenerable. It is
+never the source of a status change.
+
+Implemented:
+
+- `backend/src/lib/projectStatus.ts` - the single implementation of everything in
+  this report: rendering, parsing, path resolution, reading, writing,
+  initialization, regeneration, consistency comparison, and the centralized
+  status change.
+- New endpoints on `/api/projects/:key/status` and
+  `/api/projects/:key/status-document`.
+- `POST /api/projects/:id/stage` and the generic `PUT /api/projects/:id` now
+  delegate to that same function, so there is one status implementation to audit
+  rather than three that could drift apart.
+- `STATUS.md` is written as the last step of project creation, after `PROJECT.md`.
+- `frontend/src/components/ProjectStatusCard.tsx`, plus a status panel on the
+  project overview and a status-aware project header.
+- 37 new tests in `backend/tests/projectStatus.test.ts`.
+
+Not implemented, deliberately: no lifecycle detection, no filesystem watcher, no
+"scan the project" feature, no migration, and no second status field.
+
+## STATUS.MD PURPOSE
+
+`STATUS.md` answers one question for anyone opening the folder - including
+someone who never opens Project Hub: **what stage is this project at?**
+
+It is a control file, not a report. It says what the current status is, what
+that status means, what the rules are, and which file is authoritative. It is
+deliberately small, so it stays readable in an editor and reviewable in a diff.
+
+It is *not*:
+
+- a source of truth - the database holds the status;
+- a place to record progress notes, plans or history;
+- a replacement for `PROJECT.md`, which describes the project itself.
+
+## STATUS MODEL USED
+
+The existing model, unchanged:
+
+- Prisma field `Project.stage`, type `LifecycleStage`.
+- Values: `IDEA`, `RESEARCH`, `PLANNING`, `ARCHITECTURE`, `BUILDING`,
+  `TESTING`, `DEPLOYMENT`, `PRODUCTION`, `MAINTENANCE`, `PAUSED`, `COMPLETED`,
+  `ARCHIVED`, `ABANDONED`.
+
+`LIFECYCLE_STAGES` is `STAGES` imported from `backend/src/resources.ts` - the
+same array the rest of the application already used. Nothing was added, renamed
+or reordered. The frontend's copy is used only until the first response
+arrives; after that the status control's options come from the API's
+`validStatuses`, so the two cannot silently disagree.
+
+A test asserts the schema still has exactly one status field and that the enum
+matches the list the API publishes.
+
+## STATUS.MD STRUCTURE
+
+A fixed, parseable shape. Front matter identifies the file and the project:
+
+```
+---
+p-hub-document: "STATUS.md"
+p-hub-document-version: 1
+p-hub-project-id: 42
+p-hub-project-name: "Example"
+p-hub-status: IDEA
+p-hub-authority: "database"
+p-hub-direction: "database-to-document"
+---
+
+# Project Status
+
+**Status:** IDEA
+
+## Status Description
+## Status Rules
+## Last Controlled By
+## Valid Statuses
+```
+
+Decisions worth naming:
+
+- `**Status:** <STATUS>` in the body is the **declared** status. Front matter is
+  metadata; the parser prefers the body line and never guesses.
+- `p-hub-project-id` makes a copied file detectable rather than merely wrong.
+- The "Status Rules" section states in the file itself that editing the file does
+  not change Project Hub, so the rule travels with the file.
+- The full status list is included, so a reader does not have to open the app to
+  learn what the valid values are.
+- Parsing is whitespace-tolerant (`**Status:**IDEA` parses) but strict about the
+  value (`WAT` is reported, not coerced). A status mentioned in prose is not a
+  declaration.
+- `STATUS_DOCUMENT_MAX_BYTES` is 256 KB; a larger file is reported as unreadable
+  rather than loaded into memory.
+
+## INITIAL STATUS BEHAVIOR
+
+A new project is created with `stage = 'IDEA'`, exactly as in Phase 3, and
+`STATUS.md` is written immediately afterwards declaring `IDEA`.
+
+`STATUS.md` is written **last** - after the folder, the row, the tags and
+`PROJECT.md` - so it is generated from a project that already exists. If it
+cannot be written, the project is still returned as created, with a warning,
+because the folder and the row are real and correct.
+
+The response to project creation now carries `statusDocument`,
+`statusControl`, and a `warning`/`warnings` array when either document failed.
+
+Creating the folder, writing either document, adding source files, or having a
+Git repository, editor or package manifest present do **not** change the status.
+There is a test that fills a fresh project folder with `index.ts`,
+`package.json` and `src/main.ts` and asserts the status is still `IDEA`.
+
+## DATABASE ↔ STATUS.MD RELATIONSHIP
+
+One direction of authority, and it is checked in both directions:
+
+| Situation | Database | File | Result |
+| --- | --- | --- | --- |
+| Status changed in Project Hub | updated | rewritten | `SYNCHRONIZED` |
+| File edited by hand | unchanged | edited | `STATUS_MISMATCH` |
+| File deleted | unchanged | missing | `DOCUMENT_MISSING` |
+| File declares a non-status | unchanged | invalid | `DOCUMENT_INVALID` |
+| File cannot be read | unchanged | unreadable | `DOCUMENT_UNREADABLE` |
+| No root / no workspace / unsafe path | unchanged | absent | `UNAVAILABLE` |
+
+A mismatch is **reported and never resolved automatically**. There is no code
+path anywhere that writes `projects.stage` from a file. `autoResolved` and
+`documentToDatabaseSync` are returned as literal `false` so the contract is
+visible in the API rather than only in this document.
+
+Reading the status endpoint has no side effects; a test asserts the row is
+byte-identical after several reads.
+
+## STATUS CHANGE FLOW
+
+`changeProjectStatus(projectId, requested)` in `backend/src/lib/projectStatus.ts`
+is the only function in the application that writes `projects.stage`.
+
+1. Validate the requested value against the real enum. An unknown value is a 400
+   naming the value and the valid list; nothing is written.
+2. Load the project. If it already has the requested status, return a no-op -
+   no database write, no activity event, **and no file write**. Re-selecting the
+   current value must not discard a file someone has been editing.
+3. Update the database. This is the authority and it is not rolled back later.
+4. Write `STATUS.md` from the new status.
+5. Log the timeline event.
+6. Return the consistency snapshot.
+
+Step 4 cannot be atomic with step 3. The recovery is explicit rather than
+pretended: **if step 4 fails the database change is kept** and the response
+carries a `warning` with a code, a message and an action, plus a consistency
+snapshot stating the disagreement. Nothing is deleted or reverted. This was
+verified manually by replacing a project folder with a file: the status became
+`ARCHIVED`, the response warned, and a later explicit regenerate repaired the
+file.
+
+Two failure modes were also closed deliberately:
+
+- The activity event is written **after** the document and inside its own guard,
+  so a timeline failure cannot skip the file write or turn an applied change into
+  a bare 500.
+- `statusConsistency` never throws, so a settings-read failure cannot mask a
+  status change that already succeeded.
+
+`POST /projects/:id/stage` and `PUT /projects/:id` both delegate here. The
+pre-existing `/stage` response shape is preserved - `data.stage` still reads the
+new status - with the status snapshot added alongside.
+
+## STATUS DOCUMENT READING
+
+`GET /api/projects/:key/status-document/content` returns the file as it is on
+disk, plus its parsed form. Read-only: there is no editor and no save, because
+this phase cannot write a change back to the project, and an editable box that
+silently does nothing is worse than no box.
+
+A status in the file that is not in the enum is a 422 naming the value and the
+valid list. A missing file is a 404. A folder where the file should be is a 409.
+A workspace that is a link, or is not on disk, is a 409.
+
+The frontend renders the file through the existing `Markdown` component, as
+React elements and never as HTML, so a `STATUS.md` edited outside Project Hub
+cannot inject markup into the page.
+
+## CONSISTENCY CHECKING
+
+`GET /api/projects/:key/status` returns database status, declared status, one
+`state`, `isConsistent`, `message`, `possibleAction` and `validStatuses`.
+
+Six states, because "the file is broken" is not one problem:
+
+| State | Meaning |
+| --- | --- |
+| `SYNCHRONIZED` | They agree. |
+| `STATUS_MISMATCH` | The file declares a different valid status. |
+| `DOCUMENT_MISSING` | No file. |
+| `DOCUMENT_INVALID` | Present but declares no status, or an invalid one, or another project's id. |
+| `DOCUMENT_UNREADABLE` | A folder, a link, or too large to parse. |
+| `UNAVAILABLE` | No root, no workspace, or the stored path is unsafe. |
+
+`isConsistent` is `true` only for `SYNCHRONIZED`, `false` for a genuine
+mismatch, and `null` when it cannot be determined - it is never optimistically
+`true`.
+
+A directory is reported as `DOCUMENT_UNREADABLE` rather than `DOCUMENT_INVALID`:
+a folder is not a document that declares the wrong thing, it is a thing that
+cannot be read, and the two have different fixes.
+
+## REGENERATION BEHAVIOR
+
+Regeneration is the only operation that discards the contents of the file, so:
+
+- `POST /api/projects/:key/status-document/regenerate` requires
+  `{ confirm: true }`. Without it the request is a 400 that changes nothing on
+  disk - verified by asserting the file is byte-identical after the refusal.
+- The server does not trust that the client asked; it checks the flag itself.
+- It replaces **only** `STATUS.md`. Tests assert `PROJECT.md`, a sibling note and
+  a source file are all unchanged, and that regenerating `PROJECT.md` in Phase 4
+  leaves `STATUS.md` alone.
+- It rebuilds from the **database**, so it cannot be used to push a hand-edited
+  file into the record. It also does not change the status.
+- If the document is missing, it reports a create (`replaced: false`, 201) rather
+  than claiming to have replaced something.
+
+The confirmation dialog in the UI names the current status and states that the
+project status does not change.
+
+## EXISTING PROJECT HANDLING
+
+- **New projects**: `STATUS.md` is created with them.
+- **Existing projects**: nothing happens automatically. There is no migration,
+  no backfill, and no mass initialization. A project that predates this phase has
+  no `STATUS.md` and its status endpoint simply reports `DOCUMENT_MISSING`.
+- **Opting in**: `POST /api/projects/:key/status-document` creates it from the
+  project's *current* database status - not from `IDEA`. It refuses to overwrite
+  an existing file (409), so it cannot be used to discard an edit.
+- **Projects with no workspace** (e.g. created by document import) report
+  `PROJECT_WORKSPACE_MISSING` and are offered no button that would do nothing.
+  Nothing is ever written outside the Projects Root as a fallback.
+- **Deleting a project** deletes its folder and its `STATUS.md` with it, as part
+  of the Phase 3 folder lifecycle.
+
+## FRONTEND CHANGES
+
+- **New** `frontend/src/components/ProjectStatusCard.tsx` - the status panel:
+  the current status, the one-line state, the declared status when it differs,
+  the last-written time, a status selector, and Open / Initialize / Regenerate.
+- `ProjectOverview.tsx` - renders the card in a new "Project status" section
+  above "Project document".
+- `ProjectLayout.tsx` - the header stage selector now calls
+  `PUT /projects/:id/status` instead of `POST /:id/stage`, and **surfaces a
+  warning in the toast** if the status changed but the file did not. Previously
+  a partial failure would have been invisible here.
+- `api/types.ts` - `LifecycleStage`, `StatusConsistency`,
+  `StatusConsistencyState`, `StatusUnavailableReason`, `ChangeProjectStatusResponse`,
+  `StatusDocumentContent`.
+- `styles.css` - `.state-ok`, `.state-warn`, `.state-dim`.
+
+The card states the two rules on its face: the folder and its contents do not
+change the status, and editing `STATUS.md` does not change the project. The
+status options come from the API, so the control cannot offer a value the enum
+does not have.
+
+## BACKEND CHANGES
+
+- **New** `backend/src/lib/projectStatus.ts`.
+- `routes/projects.ts`:
+  - project creation writes `STATUS.md` last and returns `statusDocument`,
+    `statusControl` and warnings;
+  - six new routes under `/:key/status` and `/:key/status-document`;
+  - `POST /:id/stage` delegates to `changeProjectStatus`, response shape preserved;
+  - `PUT /:id` routes a stage change through `changeProjectStatus`.
+- No schema change, no migration, no new dependency.
+
+Exported surface: `LIFECYCLE_STAGES`, `INITIAL_PROJECT_STATUS`,
+`STATUS_DOCUMENT_FILENAME`, `STATUS_DOCUMENT_VERSION`,
+`STATUS_DOCUMENT_MAX_BYTES`, `renderStatusDocument`, `parseStatusDocument`,
+`previewStatusDocument`, `resolveStatusDocumentPath`, `statusDocumentStatus`,
+`readStatusDocument`, `writeStatusDocument`, `initializeStatusDocument`,
+`statusConsistency`, `changeProjectStatus`.
+
+## API ENDPOINTS
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/projects/:key/status` | Compare the database with `STATUS.md`. Read-only. |
+| PUT | `/api/projects/:key/status` | Change the status; updates `STATUS.md`. |
+| GET | `/api/projects/:key/status-document` | Does it exist, and what does it declare? |
+| GET | `/api/projects/:key/status-document/content` | The file as it is on disk. |
+| POST | `/api/projects/:key/status-document` | Initialize when missing. Refuses to overwrite. |
+| POST | `/api/projects/:key/status-document/regenerate` | Replace from the database. Requires `confirm: true`. |
+| POST | `/api/projects/:id/stage` | **Pre-existing**, now delegating. Response shape unchanged. |
+
+No endpoint accepts a path, a filename or a status outside the enum. `:key`
+resolves by id or slug, per existing convention.
+
+## FILESYSTEM SECURITY
+
+The path is always derived, never accepted: project id/slug → the row's stored
+`folderPath` → containment in the configured Projects Root → the fixed name
+`STATUS.md`. Phase 3's helpers are reused rather than reimplemented
+(`readProjectsRootSetting`, `isInsideRoot`, `probeProjectsRoot`).
+
+- **Containment** is checked on path segments, not string prefixes, so
+  `...\projects-evil` cannot pass for `...\projects`.
+- **The document path must be the workspace path plus the fixed filename**, and
+  the workspace must not be the root itself.
+
+One real gap was found and fixed during this phase. `resolveStatusDocumentPath`
+proves containment *textually*, which is enough to decide where to write but not
+enough to decide where to **read**: if a real folder is later replaced by a
+directory symlink or a Windows junction, the stored path still "looks"
+contained while `readFile` would follow the link out of the root. The writer
+already probed for this; the readers did not. All three readers
+(`readStatusDocument`, `statusConsistency`, `statusDocumentStatus`) now run the
+same `probeStatusWorkspace` check and report `PROJECT_WORKSPACE_IS_A_LINK` or
+`PROJECT_WORKSPACE_NOT_ON_DISK` instead of following it.
+
+Tests cover: a workspace pointing outside the root (planted `PRODUCTION` file is
+neither read nor reported), and a junction whose target holds a planted
+`PRODUCTION` file (same, plus nothing is written through the link). Windows
+symlink creation can require elevation, so that test degrades to a no-op rather
+than failing when the OS refuses.
+
+A document declaring another project's `p-hub-project-id` is reported as
+`DOCUMENT_INVALID` - a copied file, not a disagreement about this project.
+
+## PROJECT.MD RELATIONSHIP
+
+`PROJECT.md` describes the project: idea, requirements, features, architecture,
+stack, milestones, tasks, decisions, documents, notes, deployments, activity.
+
+`STATUS.md` controls the lifecycle: the current status, what it means, and the
+rules.
+
+Neither reads the other, and a test asserts `PROJECT.md` does not carry the
+`**Status:**` line. Both are created with the project, `PROJECT.md` first and
+`STATUS.md` second. Regenerating either replaces only that one file - Phase 4's
+"regenerating `PROJECT.md` leaves everything else alone" test now also asserts
+`STATUS.md` is untouched, which is a stronger version of the same guarantee.
+
+## TESTS ADDED
+
+`backend/tests/projectStatus.test.ts`, 37 tests in 6 groups:
+
+1. **Status model** - reuses the real enum; invents none; publishes
+   `validStatuses`; rejects a value outside it without changing anything.
+2. **Creation** - `STATUS.md` exists and declares `IDEA`; reports synchronized;
+   survives source files and a package manifest; separate from `PROJECT.md`.
+3. **Authority** - a hand edit is reported and never applied, including across
+   repeated reads; re-selecting the current status preserves a manual edit;
+   a change in the app updates the file; the timeline records it; `/stage` and
+   the generic `PUT` both sync.
+4. **Reading and failures** - reads content; reports missing, invalid,
+   no-status-line, directory-in-place-of-file, no root, and an outside-root
+   workspace.
+5. **Initialize and regenerate** - initializes from the *current* status;
+   refuses to overwrite; requires confirmation; discards an edit on regeneration;
+   touches only `STATUS.md`; reports a create rather than a replacement; does not
+   initialize projects retroactively.
+6. **Control-file and safety properties** - round-trips through the parser;
+   states its own rules; survives a quoted project name; ignores prose; refuses a
+   copied document; a linked workspace is unavailable; **the schema still has one
+   status field and the enum is unchanged**.
+
+Two existing Phase 3/4 assertions were updated, because they asserted the
+absence of the thing this phase adds:
+
+- `projectWorkspace.test.ts` expected the folder to contain only `PROJECT.md`; it
+  now expects `PROJECT.md` and `STATUS.md`.
+- `projectDocument.test.ts` expected the folder listing to be three files; it now
+  expects four and additionally asserts `STATUS.md` still declares `IDEA` after a
+  `PROJECT.md` regeneration.
+
+## TEST RESULTS
+
+```
+Test Files  7 passed (7)
+     Tests  224 passed (224)
+  Duration  23.32s
+```
+
+187 pre-existing tests plus 37 new. Backend `tsc --noEmit` clean, backend
+`npm run build` clean, frontend `tsc -b` clean, frontend `npm run build` clean.
+No lint script is configured in this repository.
+
+## DATABASE SAFETY VERIFICATION
+
+Baseline taken before any code change and again after all work:
+
+```
+tableCount    30  ->  30
+projectCount   8  ->  8
+fingerprint    da0bb60a48eb25c9ee9f9c7b6ef89c75cd3072591d8498bdf4b4fa4edef89a0d
+             ->  da0bb60a48eb25c9ee9f9c7b6ef89c75cd3072591d8498bdf4b4fa4edef89a0d
+```
+
+Every per-table count is identical, including `activity_events` (202),
+`projects` (8), `tags` (17) and `tag_assignments` (25).
+
+- **No migration.** `stage` already existed from Phase 3.
+- **No reset, no `deleteMany`, no destructive migration.**
+- The Phase 5 suite deletes only project rows it created, identified by id
+  captured at creation, and asserts pre- and post-suite fingerprints are equal.
+- The manual verification script deleted its own project and restored the
+  Projects Root setting, asserting both.
+
+**One incident worth recording.** The first run of the manual verification
+script left the Projects Root setting pointing at the temporary directory,
+because its cleanup read the setting but never wrote the original value back. It
+was caught in that run's own output, restored immediately to
+`C:\Users\ILGRIS\Desktop\projects`, and the script was fixed to restore the
+previous value (or delete the row, if it had been unset) inside its `finally`
+block. The re-run passed 39/39 with the restoration asserted as a check.
+
+## MANUAL VERIFICATION
+
+`backend/tmp-manual-p5.mjs` starts the real server on port 4781, points the
+Projects Root at a fresh `fs.mkdtemp` directory, creates one `__MANUAL__`
+project through the real API, and walks the phase end to end.
+
+**39/39 checks passed**, covering: the root being re-pointable; a project
+created with `STATUS.md` declaring `IDEA` and naming its project id; source files
+not changing the status; `PUT /status` updating both sides; `/stage` still
+working and syncing; a hand edit reported as a mismatch with the database
+unchanged after repeated reads; a no-op change preserving a manual edit; an
+invalid declared status reported and refused on read; regeneration refused
+without confirmation and leaving the file byte-identical; regeneration on
+confirmation fixing the file while `PROJECT.md`, `index.ts` and `package.json`
+stay untouched; a missing document reported and initialized from the *current*
+status without changing it; a status outside the enum refused; a broken workspace
+leaving the database updated with a warning and a stated disagreement; an
+explicit regenerate repairing the file afterwards; and 3 timeline events
+recorded.
+
+Cleanup was asserted, not assumed: the project row was deleted, the Projects Root
+restored, the temporary directory removed, and all 8 pre-existing project rows
+byte-identical afterwards.
+
+## KNOWN LIMITATIONS
+
+1. **`PROJECT.md`'s read path has the symlink gap this phase fixed in its own
+   code.** `readProjectDocument` in `lib/projectDocument.ts:894` relies on the
+   lexical containment check only. Phase 5's readers were hardened;
+   Phase 4's were not, because changing them is outside this phase's scope. A
+   linked workspace could in principle expose a `PROJECT.md` read. Worth
+   fixing in a follow-up, ideally by extracting the shared probe both now use.
+2. **Test isolation is still open** (carried from P2.11). The suite runs against
+   the live `projecthub` database with self-cleaning fixtures. This phase added
+   37 more tests against that database and verified the fingerprint, but the
+   correct fix remains a disposable test database.
+3. **`MAX_PATH` is not handled** (carried from P2.12). A long Projects Root plus
+   a 100-character folder name can exceed 260 characters on Windows.
+4. **A file that declares a status for another project is only reported**, never
+   repaired. `POST /projects/:key/status-document` refuses to overwrite and
+   regenerate requires confirmation, so there is no automatic fix - by design.
+5. **`STATUS.md` does not record history.** It shows the current status only;
+   transitions live in the activity timeline.
+6. **Cross-project view is read-only.** No bulk status operations exist.
+7. **`fs.watch` is not used and no poller exists.** If a file changes while the
+   page is open, the card shows the state from when it loaded; a reload shows the
+   new one. This is the deliberate consequence of not monitoring.
+8. **The API is unauthenticated**, consistent with the existing local
+   single-user application, and is not safe to expose on a network.
+9. **`frontend/tsconfig.tsbuildinfo` is tracked** and shows as modified after
+   every build (carried from P3.16).
+10. **A genuine `EACCES` denial cannot be produced deterministically on
+    Windows**, so the permission branch is covered by asserting the real code
+    fires rather than by forcing the condition (carried from P2.12).
+
+## PHASE 6 READINESS
+
+Ready. The status model, the document lifecycle, the consistency vocabulary and
+the centralized write path are all in place and tested, which is what Phase 6
+works from.
+
+What Phase 6 can rely on:
+
+- One status authority (`projects.stage`) with one writer
+  (`changeProjectStatus`).
+- A control file that exists for every new project and can be regenerated or
+  initialized explicitly for any project.
+- A documented set of disagreement states, so evidence-gathering has somewhere
+  to put what it finds.
+
+What Phase 6 should decide before building:
+
+- **Evidence storage.** Any evidence that justifies a status change needs a home.
+  The database is the authority, so evidence belongs in a table related to the
+  project, not inside `STATUS.md` - the file stays a representation.
+- **Whether evidence may change the status automatically.** This phase's rule is
+  that nothing does it without a user action. A recommendation is that evidence
+  produces a *proposal* the user accepts, so the authority and the audit trail
+  stay intact. Changing that rule is a real decision, not an implementation
+  detail.
+- **Migration for existing projects.** Eight projects exist with no `STATUS.md`.
+  Whether Phase 6 backfills them, or leaves initialization explicit as it is now,
+  is a choice to make deliberately.
+- **`README.md` and `AGENTS.md` are outdated** relative to Phases 3-5 (carried
+  from P3.15).
+
+Not ready, and out of scope: anything requiring filesystem monitoring,
+`MAX_PATH` handling, or test-database isolation.

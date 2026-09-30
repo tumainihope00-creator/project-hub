@@ -429,10 +429,13 @@ describe('7-9. generating and regenerating are explicit and never surprising', (
     expect(content).toContain('The real description.');
     expect(content).not.toContain('My manual edit.');
 
-    // Everything else in the folder is exactly as it was.
+    // Everything else in the folder is exactly as it was. STATUS.md is listed
+    // because a new project now also gets one (Phase 5): regenerating
+    // PROJECT.md must leave the status document alone, not rebuild it.
     expect(await fsp.readFile(sibling, 'utf8')).toBe('keep me');
     expect(await fsp.readFile(sourceFile, 'utf8')).toBe('export const x = 1;\n');
-    expect((await fsp.readdir(folder)).sort()).toEqual(['NOTES.md', 'PROJECT.md', 'index.ts']);
+    expect(await fsp.readFile(path.join(folder, 'STATUS.md'), 'utf8')).toContain('**Status:** IDEA');
+    expect((await fsp.readdir(folder)).sort()).toEqual(['NOTES.md', 'PROJECT.md', 'STATUS.md', 'index.ts']);
   });
 
   it('creates rather than "replaces" when the document is missing', async () => {

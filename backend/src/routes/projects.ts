@@ -12,6 +12,17 @@ import {
   readProjectDocument,
   writeProjectDocument
 } from '../lib/projectDocument.js';
+import {
+  INITIAL_PROJECT_STATUS,
+  LIFECYCLE_STAGES,
+  STATUS_DOCUMENT_FILENAME,
+  changeProjectStatus,
+  initializeStatusDocument,
+  readStatusDocument,
+  statusConsistency,
+  statusDocumentStatus,
+  writeStatusDocument
+} from '../lib/projectStatus.js';
 import { probeProjectsRoot, type PathProblem } from '../lib/paths.js';
 import { STAGES } from '../resources.js';
 
@@ -181,9 +192,11 @@ router.post('/', async (req, res, next) => {
         prisma.project.create({
           data: {
             ...data,
-            // A new project always starts at IDEA. Creating a folder is not
-            // development activity, and lifecycle detection is a later phase.
-            stage: 'IDEA',
+            // Phase 5: a new project always starts at IDEA. Creating a folder,
+            // writing PROJECT.md or STATUS.md, and having source files present
+            // are all things P-Hub itself did, not evidence of development. The
+            // status changes only when the user changes it.
+            stage: INITIAL_PROJECT_STATUS,
             slug,
             originalIdea,
             isArchived: false,
@@ -220,6 +233,18 @@ router.post('/', async (req, res, next) => {
       };
     }
 
+    // Phase 5: STATUS.md last of all, declaring the status the record holds -
+    // which for a new project is always IDEA. Writing this file does not change
+    // the status, and nothing about the folder's contents is inspected to decide
+    // it. The same non-rollback rule as PROJECT.md applies.
+    const statusFile = await initializeStatusDocument(project);
+    let statusControl: Awaited<ReturnType<typeof statusConsistency>> | null = null;
+    try {
+      statusControl = await statusConsistency(project);
+    } catch {
+      statusControl = null;
+    }
+
     await logActivity({
       projectId: project.id,
       type: 'PROJECT_CREATED',
@@ -227,7 +252,23 @@ router.post('/', async (req, res, next) => {
       relatedType: 'project',
       relatedId: project.id
     });
-    res.status(201).json({ data: { ...project, projectDocument: documentStatus }, ...(documentWarning ? { warning: documentWarning } : {}) });
+
+    // One `warning` key, matching the existing convention. A warning here is
+    // informational: the project exists either way.
+    const warnings = [
+      ...(documentWarning ? [documentWarning] : []),
+      ...(statusFile.warning ? [statusFile.warning] : [])
+    ];
+
+    res.status(201).json({
+      data: {
+        ...project,
+        projectDocument: documentStatus,
+        statusDocument: statusFile.status,
+        statusControl
+      },
+      ...(warnings.length ? { warning: warnings[0], warnings } : {})
+    });
   } catch (e) {
     next(e);
   }
@@ -410,6 +451,154 @@ router.post('/:key/project-document/regenerate', async (req, res, next) => {
 });
 
 // --------------------------------------------------------------------------
+// STATUS.md and project status (Phase 5)
+//
+// Two separate concerns share this block:
+//
+//   1. the status itself - `projects.stage`, changed only through
+//      `changeProjectStatus` in lib/projectStatus.ts;
+//   2. STATUS.md, the control file that represents that status on disk.
+//
+// The database stays the authority. Nothing here reads STATUS.md and writes it
+// back to the record, and no endpoint accepts a path, a filename or a status
+// outside the existing LifecycleStage enum.
+// --------------------------------------------------------------------------
+
+/**
+ * `GET /projects/:key/status` - compare the database status with STATUS.md.
+ *
+ * Read-only and non-destructive. It reports database status, document status
+ * and whether they agree, and it never resolves a disagreement in either
+ * direction.
+ */
+router.get('/:key/status', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const consistency = await statusConsistency(project);
+    res.json({ data: consistency });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * `PUT /projects/:key/status` - change the status explicitly.
+ *
+ * Updates the database and then STATUS.md, and returns the resulting
+ * consistency snapshot. A database update that could not be mirrored to disk is
+ * reported as a `warning`, never as a clean success.
+ */
+router.put('/:key/status', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const parsed = z
+      .object({ stage: z.enum(LIFECYCLE_STAGES), note: z.string().trim().max(500).optional() })
+      .strict()
+      .safeParse(req.body);
+    if (!parsed.success) {
+      // An unknown status is a validation failure naming the real values, not a
+      // generic bad request, and it changes nothing.
+      throw badRequest('Invalid project status', {
+        code: 'INVALID_PROJECT_STATUS',
+        received: (req.body ?? {}).stage ?? null,
+        validStatuses: [...LIFECYCLE_STAGES]
+      });
+    }
+    const result = await changeProjectStatus(project.id, parsed.data.stage, { note: parsed.data.note });
+    res.json({
+      data: { ...result.project, statusChange: result },
+      ...(result.warning ? { warning: result.warning } : {})
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * `GET /projects/:key/status-document` - is STATUS.md there, and what does it
+ * say? A normal answer is `available: false` with a reason rather than an error,
+ * because the details page asks this on every load.
+ */
+router.get('/:key/status-document', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const status = await statusDocumentStatus(project);
+    res.json({ data: status });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * `GET /projects/:key/status-document/content` - the document as it is on disk.
+ *
+ * Read-only, for the viewer. An invalid status inside the file is a 422 that
+ * names the value and lists the real ones; the file is not replaced and the
+ * project record is not touched.
+ */
+router.get('/:key/status-document/content', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const document = await readStatusDocument(project);
+    res.json({ data: document });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * `POST /projects/:key/status-document` - Initialize.
+ *
+ * The explicit action for an existing project whose STATUS.md is missing. It
+ * writes the document from the project's current database status and never
+ * touches the record. It refuses to overwrite: a project that already has the
+ * file gets a clear conflict, not a silent replacement.
+ */
+router.post('/:key/status-document', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const result = await writeStatusDocument(project, { overwrite: false });
+    const consistency = await statusConsistency(project);
+    res.status(201).json({ data: { status: result.status, consistency }, bytes: result.bytes, replaced: false });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * `POST /projects/:key/status-document/regenerate` - Regenerate.
+ *
+ * The only endpoint that discards the contents of STATUS.md, so it requires an
+ * explicit `confirm: true` and it replaces only that one file. PROJECT.md,
+ * source files, configuration and other project folders are never touched.
+ */
+router.post('/:key/status-document/regenerate', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const parsed = z.object({ confirm: z.literal(true) }).strict().safeParse(req.body);
+    if (!parsed.success) {
+      throw badRequest(
+        `Regenerating ${STATUS_DOCUMENT_FILENAME} replaces the file with the current database status (${project.stage}) and discards any manual edits to it, so it needs an explicit confirmation.`,
+        { requires: 'confirm: true', received: req.body ?? {} }
+      );
+    }
+    const status = await statusDocumentStatus(project);
+    if (status.available && status.exists === false) {
+      // Regenerating something that is not there is just creating it, and
+      // reporting a replacement that replaced nothing would be a lie.
+      const created = await writeStatusDocument(project, { overwrite: false });
+      const consistency = await statusConsistency(project);
+      return res.status(201).json({ data: { status: created.status, consistency }, bytes: created.bytes, replaced: false });
+    }
+    const result = await writeStatusDocument(project, { overwrite: true });
+    const consistency = await statusConsistency(project);
+    res.json({ data: { status: result.status, consistency }, bytes: result.bytes, replaced: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// --------------------------------------------------------------------------
 // Get / update / delete
 // --------------------------------------------------------------------------
 
@@ -433,6 +622,18 @@ router.put('/:id', async (req, res, next) => {
     if (data.name && data.name !== project.name) {
       data.slug = await uniqueSlug(data.name, project.id);
     }
+
+    // Phase 5: `stage` used to be written by this generic update as well as by
+    // POST /stage, which meant two code paths could move a project's status and
+    // only one of them logged it. The status is now routed through the same
+    // service as every other change, so STATUS.md is updated either way and
+    // there is a single implementation to audit.
+    let statusChange: Awaited<ReturnType<typeof changeProjectStatus>> | null = null;
+    if (data.stage !== undefined && data.stage !== project.stage) {
+      statusChange = await changeProjectStatus(project.id, data.stage);
+    }
+    delete data.stage;
+
     const updated = await prisma.project.update({ where: { id: project.id }, data });
     if (Array.isArray(tags)) await setTags('project', project.id, tags);
     await logActivity({
@@ -443,7 +644,14 @@ router.put('/:id', async (req, res, next) => {
       relatedId: project.id
     });
     const updatedTags = await tagsFor('project', project.id);
-    res.json({ data: { ...updated, tags: updatedTags } });
+    res.json({
+      data: {
+        ...updated,
+        tags: updatedTags,
+        ...(statusChange ? { statusChange } : {})
+      },
+      ...(statusChange?.warning ? { warning: statusChange.warning } : {})
+    });
   } catch (e) {
     next(e);
   }
@@ -501,22 +709,38 @@ router.post('/:id/activate', async (req, res, next) => {
   }
 });
 
+/**
+ * The pre-existing stage endpoint, kept because existing UI and existing API
+ * callers use it.
+ *
+ * Phase 5: it no longer writes the column itself. It validates and delegates to
+ * `changeProjectStatus`, so this endpoint and `PUT /projects/:key/status` are
+ * two spellings of one operation rather than two implementations that could
+ * drift apart. The response keeps `data.stage` where callers already read it,
+ * and adds the status snapshot.
+ */
 router.post('/:id/stage', async (req, res, next) => {
   try {
     const project = await resolveProject(req.params.id);
-    const parsed = z.object({ stage: z.enum(STAGES), note: z.string().optional() }).safeParse(req.body);
-    if (!parsed.success) throw badRequest('Invalid stage');
+    const parsed = z
+      .object({ stage: z.enum(STAGES), note: z.string().trim().max(500).optional() })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      throw badRequest('Invalid stage', {
+        code: 'INVALID_PROJECT_STATUS',
+        received: (req.body ?? {}).stage ?? null,
+        validStatuses: [...LIFECYCLE_STAGES]
+      });
+    }
     const { stage, note } = parsed.data;
-    const updated = await prisma.project.update({ where: { id: project.id }, data: { stage } });
-    await logActivity({
-      projectId: project.id,
-      type: 'STAGE_CHANGED',
-      description: `Stage changed: ${project.stage} → ${stage}${note ? ` (${note})` : ''}`,
-      metadata: { fromStage: project.stage, toStage: stage, note: note ?? null },
-      relatedType: 'project',
-      relatedId: project.id
+    const result = await changeProjectStatus(project.id, stage, { note });
+    // `data` keeps the project row it always was, so every existing caller of
+    // this endpoint reads exactly what it read before. The status snapshot and
+    // any partial-state warning are additive.
+    res.json({
+      data: { ...result.project, statusChange: result },
+      ...(result.warning ? { warning: result.warning } : {})
     });
-    res.json({ data: updated });
   } catch (e) {
     next(e);
   }

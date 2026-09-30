@@ -133,6 +133,118 @@ export interface ProjectDocumentContent {
   documentToDatabaseSync: false;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5: STATUS.md and the project status
+// ---------------------------------------------------------------------------
+
+/**
+ * The project statuses, as the backend reports them.
+ *
+ * The list comes from the API (`validStatuses`) rather than a copy kept in the
+ * client, so a status added to the enum cannot be silently missing from the UI.
+ * `src/resources.ts` still carries the same list for the places that need a
+ * label before any request has finished.
+ */
+export type LifecycleStage =
+  | 'IDEA'
+  | 'RESEARCH'
+  | 'PLANNING'
+  | 'ARCHITECTURE'
+  | 'BUILDING'
+  | 'TESTING'
+  | 'DEPLOYMENT'
+  | 'PRODUCTION'
+  | 'MAINTENANCE'
+  | 'PAUSED'
+  | 'COMPLETED'
+  | 'ARCHIVED'
+  | 'ABANDONED';
+
+export type StatusUnavailableReason =
+  | 'PROJECTS_ROOT_NOT_CONFIGURED'
+  | 'PROJECT_WORKSPACE_MISSING'
+  | 'PROJECT_WORKSPACE_UNSAFE'
+  | 'PROJECT_WORKSPACE_NOT_ON_DISK'
+  | 'PROJECT_WORKSPACE_IS_A_LINK';
+
+/**
+ * Every way the database and STATUS.md can fail to agree.
+ *
+ * The point of the extra states is that the UI never has to reduce "the file is
+ * broken" to "the status is wrong": a missing file, an unreadable file and a file
+ * declaring something that is not a status are three different problems with
+ * three different fixes.
+ */
+export type StatusConsistencyState =
+  | 'SYNCHRONIZED'
+  | 'STATUS_MISMATCH'
+  | 'DOCUMENT_MISSING'
+  | 'DOCUMENT_INVALID'
+  | 'DOCUMENT_UNREADABLE'
+  | 'UNAVAILABLE';
+
+export interface StatusConsistency {
+  projectId: number;
+  projectName: string;
+  /** The database is the authority. This is the status of the project. */
+  databaseStatus: LifecycleStage;
+  /** What STATUS.md declares, or null when it declares nothing valid. */
+  documentStatus: LifecycleStage | null;
+  /** True only for SYNCHRONIZED; null when it cannot be determined. */
+  isConsistent: boolean | null;
+  state: StatusConsistencyState;
+  relativePath: string;
+  documentPath?: string;
+  documentExists: boolean | null;
+  documentModifiedAt: string | null;
+  /** The literal text found in the file, so an invalid value can be shown. */
+  rawDocumentStatus: string | null;
+  invalidDocumentStatus?: string | null;
+  documentProjectId?: number | null;
+  reason?: StatusUnavailableReason;
+  message?: string;
+  possibleAction?: string;
+  /** The authoritative list, so the client never invents a status. */
+  validStatuses: LifecycleStage[];
+  /** Phase 5 never resolves a disagreement on its own. */
+  autoResolved: false;
+  /** Editing STATUS.md never changes the project record. */
+  documentToDatabaseSync: false;
+}
+
+export interface ChangeProjectStatusResponse {
+  projectId: number;
+  projectName: string;
+  previousStatus: LifecycleStage;
+  status: LifecycleStage;
+  statusChanged: boolean;
+  documentWritten: boolean;
+  /** True when the requested status was already the stored one. */
+  noChange: boolean;
+  consistency: StatusConsistency;
+  warning?: { code: string; message: string; possibleAction: string };
+}
+
+export interface StatusDocumentContent {
+  projectId: number;
+  projectName: string;
+  relativePath: string;
+  documentPath: string;
+  content: string;
+  parsed: {
+    status: LifecycleStage | null;
+    rawStatus: string | null;
+    projectId: number | null;
+    hasStatusLine: boolean;
+    isValidStatus: boolean;
+  };
+  sizeBytes: number;
+  modifiedAt: string | null;
+  documentVersion: number;
+  direction: 'DATABASE_TO_DOCUMENT';
+  documentToDatabaseSync: false;
+}
+
 export interface ProjectRelationship {
   id: number;
   fromProjectId: number;

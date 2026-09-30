@@ -70,11 +70,19 @@ export function ProjectLayout() {
       </div>
     );
 
+  // Phase 5: this is the same centralized operation the STATUS.md card uses, so
+  // changing the stage from the header updates STATUS.md too. `POST /stage` is
+  // still there for older callers, but the UI uses the endpoint that reports
+  // whether the file actually changed.
   const changeStage = async (stage: string) => {
     setStageBusy(true);
     try {
-      await api.post(`/projects/${project.id}/stage`, { stage });
-      toast(`Stage → ${humanize(stage)}`);
+      const res = await api.put<{
+        stage: string;
+        statusChange?: { warning?: { message: string } };
+      }>(`/projects/${project.id}/status`, { stage });
+      const warning = res.data.statusChange?.warning;
+      toast(warning ? `Status → ${humanize(stage)} — ${warning.message}` : `Status → ${humanize(stage)}`);
       reload();
       window.dispatchEvent(new CustomEvent('data-changed'));
     } finally {
