@@ -1,5 +1,6 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { prisma } from './prisma.js';
 import { ApiError } from './errors.js';
 import { readProjectsRootSetting } from './settings.js';
@@ -13,13 +14,17 @@ import { tagsFor } from './tags.js';
  *
  * The single rule this file exists to enforce:
  *
- *   DATABASE -> PROJECT.md      supported here
- *   PROJECT.md -> DATABASE      NOT supported, and not attempted
+ *   DATABASE -> PROJECT.md      supported here (rendering)
+ *   PROJECT.md -> DATABASE      supported by the Phase 6 sibling modules, not here
  *
- * Nothing in this module parses, imports, or applies anything from an existing
- * PROJECT.md. The document is written from the database and read back for human
- * inspection only. A later synchronization phase owns the other direction; if
- * this file ever grows a parser, that boundary has been crossed.
+ * This module owns the rendering direction only: it writes PROJECT.md from the
+ * database and reads the bytes back for inspection. The reverse direction lives in
+ * projectDocumentParser.ts (parsing) and projectDocumentSync.ts / .Service.ts
+ * (change sets and transactional writes). That split is deliberate. Parsing lives
+ * outside this module so that nothing in the render path can ever be mistaken for
+ * an import, and so a failure to parse can never write to the database from inside
+ * a renderer. The two modules agree on the format by sharing nothing but these
+ * documented headings; the parser has tests that read real generated output.
  *
  * Everything is generated from an explicit allowlist of real columns. No field
  * is invented, and `originalIdea` is deliberately excluded: it is a JSON
@@ -869,6 +874,25 @@ export async function writeProjectDocument(
         possibleAction: 'Check that the workspace folder is writable, then try again. Nothing else in the folder was changed.'
       }
     );
+  }
+
+  // A freshly generated document is by definition the last-known document: record
+  // its hash (and the hash of the state it was built from) so Phase 6 change
+  // detection starts from a clean baseline instead of "never synchronized". This
+  // is also what breaks the write -> detect -> write loop: a generate makes the
+  // document match the database, so there is nothing for a sync to apply.
+  try {
+    await prisma.project.update({
+      where: { id: project.id },
+      data: {
+        projectDocumentHash: createHash('sha256').update(markdown, 'utf8').digest('hex'),
+        projectDocumentStateHash: createHash('sha256').update(markdown, 'utf8').digest('hex')
+      }
+    });
+  } catch {
+    // Recording the baseline is a convenience for change detection, not a
+    // precondition for writing the file. If the column write fails the document is
+    // still correct on disk; the next sync simply treats it as a first sync.
   }
 
   return {

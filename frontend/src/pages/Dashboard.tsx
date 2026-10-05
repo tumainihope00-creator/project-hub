@@ -5,6 +5,7 @@ import type { DashboardData, NextAction } from '../api/types';
 import { Badge, Loading, StageBadge, TimeAgo, EmptyState } from '../components/ui';
 import { humanize } from '../resources';
 import { statusColor } from '../lib/status';
+import { DocumentChangePanel } from '../components/DocumentChangePanel';
 
 export function Dashboard() {
   const { data, loading } = useApi<DashboardData>('/dashboard');
@@ -60,6 +61,8 @@ export function Dashboard() {
 
       <div className="grid c2" style={{ marginTop: 16 }}>
         <div>
+          <DocumentChangePanel />
+
           <h2 className="section">Next actions</h2>
           <div className="card">
             {!nextActions || nextActions.length === 0 ? (

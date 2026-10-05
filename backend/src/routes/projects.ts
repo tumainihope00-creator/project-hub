@@ -13,6 +13,19 @@ import {
   writeProjectDocument
 } from '../lib/projectDocument.js';
 import {
+  previewProjectDocumentSync,
+  projectDocumentSyncState,
+  runProjectDocumentSync
+} from '../lib/projectDocumentSyncService.js';
+import {
+  checkProjectNow,
+  dismissProjectChange,
+  getProjectMonitorReport,
+  markProjectSynchronized,
+  registerProject,
+  unregisterProject
+} from '../lib/projectDocumentMonitor.js';
+import {
   INITIAL_PROJECT_STATUS,
   LIFECYCLE_STAGES,
   STATUS_DOCUMENT_FILENAME,
@@ -253,6 +266,21 @@ router.post('/', async (req, res, next) => {
       relatedId: project.id
     });
 
+    // Phase 7: start watching this project's PROJECT.md immediately, so a user
+    // who opens the project in an editor seconds after creating it is monitored
+    // from the first keystroke rather than only after the next server restart.
+    //
+    // Registration is best-effort and deliberately not awaited into the response
+    // path's critical section: a monitoring failure must never turn a successful
+    // project creation into an error. The PROJECT.md baseline established here is
+    // exactly the file just written, so no change is reported.
+    void registerProject(project).catch(err => {
+      console.warn(
+        `[document-monitor] could not register new project ${project.id}:`,
+        err instanceof Error ? err.message : err
+      );
+    });
+
     // One `warning` key, matching the existing convention. A warning here is
     // informational: the project exists either way.
     const warnings = [
@@ -445,6 +473,151 @@ router.post('/:key/project-document/regenerate', async (req, res, next) => {
     }
     const result = await writeProjectDocument(project, { overwrite: true });
     res.json({ data: result.status, bytes: result.bytes, replaced: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// --------------------------------------------------------------------------
+// PROJECT.md -> database synchronization (Phase 6)
+//
+// Three explicit, user-triggered endpoints. None of them accepts a path: the
+// document is located from the stored workspace exactly as Phase 4 does.
+//
+//   GET  /:key/project-document/sync/state   read-only change detection
+//   POST /:key/project-document/sync/preview build a change set, write nothing
+//   POST /:key/project-document/sync         apply the change set atomically
+//
+// There is no watcher, no timer and no implicit call to any of these. STATUS.md is
+// not read here and `projects.stage` is never written by this block.
+// --------------------------------------------------------------------------
+
+/**
+ * Change detection for the details page: has PROJECT.md changed since it was last
+ * synchronized? Read-only, cheap, and safe to call on every page load.
+ */
+router.get('/:key/project-document/sync/state', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    res.json({ data: await projectDocumentSyncState(project.id) });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Preview: parse the document and report exactly what a synchronization would do,
+ * changing nothing.
+ *
+ * The response is the same change set `POST .../sync` would apply, so the list the
+ * user approves is the list that runs. `applicable: false` means errors were found
+ * (wrong project, unsupported version, duplicate record keys) and synchronizing is
+ * refused until they are fixed.
+ */
+router.post('/:key/project-document/sync/preview', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    res.json({ data: await previewProjectDocumentSync(project.id) });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Synchronize: apply the document to the database in one transaction.
+ *
+ * `acknowledgeConflict: true` is required when the database changed after the last
+ * synchronization. It is not optional and not inferred: the server will not let a
+ * document overwrite newer database data silently.
+ */
+router.post('/:key/project-document/sync', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const parsed = z
+      .object({ acknowledgeConflict: z.boolean().optional().default(false) })
+      .strict()
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      throw badRequest('The synchronization request body was not understood.', {
+        received: req.body ?? {}
+      });
+    }
+    const result = await runProjectDocumentSync(project.id, {
+      acknowledgeConflict: parsed.data.acknowledgeConflict
+    });
+    // Tell the monitor the pending change is resolved, so it does not immediately
+    // re-report the change the user just applied. Only on a real apply: an
+    // unchanged or refused synchronization leaves the document still outstanding.
+    if (result.applied) {
+      await markProjectSynchronized(project.id);
+    }
+    res.json({ data: result });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// --------------------------------------------------------------------------
+// PROJECT.md change monitoring (Phase 7)
+//
+// Four explicit, user-visible endpoints over the one centralized monitor in
+// lib/projectDocumentMonitor.ts. None of them accepts a path: the document is
+// located from the stored workspace exactly as Phase 4 and Phase 6 do.
+//
+//   GET  /:key/project-document/monitor         the monitored state for this project
+//   POST /:key/project-document/monitor/check   re-read the file right now
+//   POST /:key/project-document/monitor/dismiss hide the notification, keep the change
+//
+// Every one of these is read-only with respect to project data. Dismissal writes
+// only the monitoring columns; check writes nothing at all.
+// --------------------------------------------------------------------------
+
+/**
+ * The monitoring state for one project: what was detected, when, by which mode,
+ * and whether a notification is pending.
+ *
+ * The service may not be running (in tests, or when the monitor failed to start),
+ * in which case `monitored: false` and an explanation are returned instead of a
+ * misleading "synchronized".
+ */
+router.get('/:key/project-document/monitor', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    res.json({ data: getProjectMonitorReport(project.id) });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Re-read PROJECT.md now and report the result, without waiting for an event.
+ *
+ * Read-only. This is the escape hatch for a missed filesystem event and the
+ * "I just fixed it, look again" button; the automatic path does not depend on it.
+ */
+router.post('/:key/project-document/monitor/check', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const notification = await checkProjectNow(project.id);
+    res.json({ data: { ...getProjectMonitorReport(project.id), notification } });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Dismiss the pending notification for this project.
+ *
+ * Dismissing hides the notification and records that dismissal; it does not
+ * revert, discard or ignore the change. The document is still out of sync with the
+ * database, the details page still shows it, and the next real edit produces a
+ * fresh notification.
+ */
+router.post('/:key/project-document/monitor/dismiss', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    await dismissProjectChange(project.id);
+    res.json({ data: getProjectMonitorReport(project.id) });
   } catch (e) {
     next(e);
   }
@@ -663,6 +836,9 @@ router.delete('/:id', async (req, res, next) => {
     const project = await resolveProject(req.params.id);
     if (req.query.hard === 'true') {
       await prisma.project.delete({ where: { id: project.id } });
+      // Stop watching before returning: the row is gone, so any later event would
+      // re-analyze a project that no longer exists.
+      await unregisterProject(project.id);
       return res.json({ data: { id: project.id, deleted: true, hard: true } });
     }
     if (!project.isArchived) {
@@ -674,6 +850,9 @@ router.delete('/:id', async (req, res, next) => {
         relatedType: 'project',
         relatedId: project.id
       });
+      // An archived project keeps its folder and its PROJECT.md, so it stays
+      // watched. Archiving is not deleting and must not silently stop monitoring
+      // a file that is still on disk and still editable.
     }
     res.json({ data: { id: project.id, deleted: false, archived: true, hard: false } });
   } catch (e) {

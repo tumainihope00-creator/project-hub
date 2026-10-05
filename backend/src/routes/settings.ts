@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { badRequest } from '../lib/errors.js';
+import { resyncDocumentMonitor } from '../lib/projectDocumentMonitor.js';
 import {
   clearProjectsRoot,
   getProjectsRoot,
@@ -53,7 +54,22 @@ router.put('/projects-root', async (req, res, next) => {
   try {
     const parsed = optionalBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) throw badRequest('Invalid input', parsed.error.flatten());
-    res.json({ data: await saveProjectsRoot(parsed.data.path ?? undefined) });
+    const saved = await saveProjectsRoot(parsed.data.path ?? undefined);
+    // Phase 7: the Projects Root decides where every PROJECT.md may be read from,
+    // so changing it invalidates every watcher. Rebuild them immediately instead
+    // of leaving watches on folders that are no longer inside the root, or on
+    // nothing at all when the root was previously unset.
+    //
+    // Best-effort and non-fatal: the setting is already saved, and a monitor that
+    // cannot rebuild is a degraded monitor, not a failed save.
+    const monitor = await resyncDocumentMonitor().catch(err => {
+      console.warn(
+        '[document-monitor] could not rebuild watches after the Projects Root changed:',
+        err instanceof Error ? err.message : err
+      );
+      return null;
+    });
+    res.json({ data: { ...saved, documentMonitor: monitor } });
   } catch (e) {
     next(e);
   }
@@ -81,7 +97,17 @@ router.post('/projects-root/initialize', async (req, res, next) => {
 
 router.delete('/projects-root', async (_req, res, next) => {
   try {
-    res.json({ data: await clearProjectsRoot() });
+    const cleared = await clearProjectsRoot();
+    // Nothing can be resolved without a root, so stop every watcher rather than
+    // leaving them pointed at folders Project Hub can no longer vouch for.
+    const monitor = await resyncDocumentMonitor().catch(err => {
+      console.warn(
+        '[document-monitor] could not stop watches after clearing the Projects Root:',
+        err instanceof Error ? err.message : err
+      );
+      return null;
+    });
+    res.json({ data: { ...cleared, documentMonitor: monitor } });
   } catch (e) {
     next(e);
   }

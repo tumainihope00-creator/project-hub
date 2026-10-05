@@ -261,6 +261,48 @@ model Project {
   // exactly as they are, and a later migration can attach them if the user asks.
   folderName String?
   folderPath String?
+  // PROJECT.md synchronization metadata (Phase 6). Three nullable columns, no
+  // backfill, for the same reason folderName/folderPath are nullable: existing
+  // projects keep working exactly as before, and a null hash simply means "this
+  // document has never been synchronized", which is a real state the UI
+  // reports rather than a gap to paper over.
+  //
+  //   projectDocumentHash      sha256 of the PROJECT.md bytes on disk as of the
+  //                           last generate or sync. Change detection compares
+  //                           against this. Never derived from mtime.
+  //   projectDocumentStateHash sha256 of the document Project Hub would generate
+  //                           from the database right now, captured at the last
+  //                           sync. If this no longer matches a freshly rendered
+  //                           document, the database moved after the last sync,
+  //                           which is what makes a conflict detectable instead
+  //                           of being silently overwritten.
+  //   projectDocumentSyncedAt  when the last successful synchronization applied.
+  projectDocumentHash String?
+  projectDocumentStateHash String?
+  projectDocumentSyncedAt DateTime?
+  // PROJECT.md monitoring state (Phase 7). Four more nullable columns, same
+  // reasoning: additive, no backfill, no default, so existing rows are untouched
+  // and every null here is a real state ("the monitor has not detected a change
+  // yet") rather than a gap.
+  //
+  // These four columns hold *monitoring bookkeeping only*. They are written
+  // exclusively by lib/projectDocumentMonitor.ts, which never touches any project
+  // data column and never touches a child table. Project content still only moves
+  // through the explicit Phase 6 synchronization.
+  //
+  //   projectDocumentLastDetectedHash sha256 of the PROJECT.md bytes the monitor
+  //                           last analyzed, so a restart or a rescan can tell
+  //                           "already reported" from "never looked at".
+  //   projectDocumentDetectedAt      when the monitor last detected content that
+  //                           differed from projectDocumentHash. Not mtime.
+  //   projectDocumentChangeState     the classified state of that detection
+  //                           (MODIFIED, CONFLICT, INVALID, ...).
+  //   projectDocumentDismissedAt     when the user dismissed the notification, so
+  //                           an unchanged file is not re-notified forever.
+  projectDocumentLastDetectedHash String?
+  projectDocumentDetectedAt DateTime?
+  projectDocumentChangeState String?
+  projectDocumentDismissedAt DateTime?
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 

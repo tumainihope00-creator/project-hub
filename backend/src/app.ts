@@ -11,6 +11,7 @@ import miscRouter from './routes/misc.js';
 import { generatorRouter } from './routes/generator.js';
 import { importRouter } from './routes/import.js';
 import settingsRouter from './routes/settings.js';
+import documentMonitorRouter from './routes/documentMonitor.js';
 
 export function createApp() {
   const app = express();
@@ -48,6 +49,10 @@ export function createApp() {
 
   // Application settings (Projects Root). Application-wide, not project data.
   app.use('/api/settings', settingsRouter);
+
+  // Application-wide PROJECT.md monitoring (Phase 7). One centralized service
+  // behind this router, never one per client.
+  app.use('/api/document-monitor', documentMonitorRouter);
 
   // Document import (creates new projects only; never modifies existing data)
   app.use('/api/import', importRouter);

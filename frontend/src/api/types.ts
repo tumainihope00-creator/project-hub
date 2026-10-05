@@ -134,6 +134,217 @@ export interface ProjectDocumentContent {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 6: PROJECT.md -> database synchronization
+// ---------------------------------------------------------------------------
+
+/**
+ * Read-only change detection, shown on every load of the document card.
+ *
+ * `modified` is decided by comparing content hashes, never by the file's mtime, so
+ * a `touch` or a copy that changes nothing does not read as an edit.
+ */
+export interface ProjectDocumentSyncState {
+  projectId: number;
+  documentHash: string | null;
+  lastSyncedHash: string | null;
+  lastSyncedAt: string | null;
+  modified: boolean;
+  neverSynchronized: boolean;
+  /** The database moved after the last synchronization. */
+  conflict: boolean;
+}
+
+export interface ProjectDocumentSyncIssue {
+  code: string;
+  message: string;
+}
+
+export interface ProjectDocumentFieldChange {
+  field: string;
+  from: string | null;
+  to: string | null;
+}
+
+export interface ProjectDocumentChildChange {
+  entity: string;
+  action: 'create' | 'update';
+  key: string;
+  label: string;
+  changes: { field: string; from: unknown; to: unknown }[];
+}
+
+export interface ProjectDocumentUnmatchedRecord {
+  entity: string;
+  key: string;
+  label: string;
+}
+
+/** The same shape the preview returns and the sync applies, so they cannot disagree. */
+export interface ProjectDocumentSyncPreview {
+  projectId: number;
+  projectName: string;
+  relativePath: string;
+  documentVersion: number | null;
+  documentHash: string;
+  unchanged: boolean;
+  firstSynchronization: boolean;
+  conflict: boolean;
+  /** False when the change set cannot be applied (errors present). */
+  applicable: boolean;
+  projectChanges: ProjectDocumentFieldChange[];
+  childChanges: ProjectDocumentChildChange[];
+  /** Database records with no counterpart in the document. Reported, never deleted. */
+  unmatchedDatabaseRecords: ProjectDocumentUnmatchedRecord[];
+  warnings: ProjectDocumentSyncIssue[];
+  errors: ProjectDocumentSyncIssue[];
+  unsupportedSections: string[];
+  preservedDetailSections: { section: string; reason: string }[];
+}
+
+/** The preview plus the outcome of the synchronization that was applied. */
+export interface ProjectDocumentSyncResult extends ProjectDocumentSyncPreview {
+  applied: {
+    appliedProjectChanges: ProjectDocumentFieldChange[];
+    appliedChildChanges: { entity: string; action: 'create' | 'update'; key: string; label: string }[];
+    unmatchedDatabaseRecords: ProjectDocumentUnmatchedRecord[];
+    warnings: ProjectDocumentSyncIssue[];
+    syncedAt: string;
+  } | null;
+  /** Why nothing was applied, when applicable. */
+  skipped: 'unchanged' | 'not_applicable' | null;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7: PROJECT.md change monitoring
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a monitored PROJECT.md is not synchronized with its project.
+ *
+ * The states are separate on purpose. A missing file, an unreadable file, a file
+ * that is valid but belongs to a different project and a file that parses but
+ * records conflicts are four different problems with four different fixes, and
+ * collapsing them into one "problem" indicator would leave the user guessing.
+ */
+export type DocumentMonitorState =
+  | 'SYNCHRONIZED'
+  | 'MODIFIED'
+  | 'CONFLICT'
+  | 'INVALID'
+  | 'UNSUPPORTED_VERSION'
+  | 'IDENTITY_MISMATCH'
+  | 'MISSING'
+  | 'UNREADABLE'
+  | 'UNAVAILABLE'
+  | 'ERROR';
+
+/** How this project's document is actually being watched. */
+export type DocumentMonitorMode = 'WATCH' | 'POLL';
+
+/**
+ * The service's real operating mode.
+ *
+ * `HYBRID` means some projects are watched and some are polled because a watcher
+ * could not be established for those; `STOPPED` means the monitor is not running.
+ * The UI reports this as-is rather than claiming live watching it does not have.
+ */
+export type DocumentMonitorServiceMode = 'STOPPED' | 'WATCH' | 'HYBRID' | 'POLL';
+
+export interface DocumentMonitorIssue {
+  code: string;
+  message: string;
+}
+
+/**
+ * A detected change, as the dashboard and the project page show it.
+ *
+ * Contains counts, field *names* and entity names only - never a field value, a
+ * record key or document text. The full detail is on the Phase 6 preview endpoint,
+ * which the user opens deliberately.
+ */
+export interface DocumentChangeNotification {
+  id: string;
+  projectId: number;
+  projectName: string;
+  relativePath: string;
+  state: DocumentMonitorState;
+  mode: DocumentMonitorMode;
+  detectedAt: string;
+  documentHash: string | null;
+  lastSyncedHash: string | null;
+  lastSyncedAt: string | null;
+  summary: string;
+  projectFieldCount: number;
+  recordChangeCount: number;
+  recordCreateCount: number;
+  recordUpdateCount: number;
+  changedFieldNames: string[];
+  changedEntityNames: string[];
+  noRecordDifferences: boolean;
+  warnings: DocumentMonitorIssue[];
+  errors: DocumentMonitorIssue[];
+  dismissedAt: string | null;
+}
+
+/** The monitored state of one project, for the project details page. */
+export interface ProjectMonitorReport {
+  projectId: number;
+  projectName: string;
+  relativePath: string;
+  state: DocumentMonitorState;
+  mode: DocumentMonitorMode;
+  monitored: boolean;
+  unavailableReason: string | null;
+  documentHash: string | null;
+  lastSyncedHash: string | null;
+  lastSyncedAt: string | null;
+  detectedAt: string | null;
+  dismissedAt: string | null;
+  summary: string | null;
+  hasPendingChange: boolean;
+  message: string | null;
+}
+
+/** The application-wide monitor status. */
+export interface DocumentMonitorStatus {
+  running: boolean;
+  mode: DocumentMonitorServiceMode;
+  projectsRoot: string | null;
+  watchedProjects: number;
+  polledProjects: number;
+  skippedProjects: number;
+  debounceMs: number;
+  pollIntervalMs: number;
+  registeredAt: string | null;
+  lastScanAt: string | null;
+  lastError: string | null;
+}
+
+/** `GET /api/document-monitor` */
+export interface DocumentMonitorSnapshot {
+  status: DocumentMonitorStatus;
+  pending: DocumentChangeNotification[];
+  /** Undismissed pending changes: the dashboard badge number. */
+  pendingCount: number;
+  skipped: { projectId: number; reason: string }[];
+  streamClients: number;
+}
+
+/** Human labels for the monitoring states, kept in one place. */
+export const DOCUMENT_MONITOR_STATE_LABEL: Record<DocumentMonitorState, string> = {
+  SYNCHRONIZED: 'In sync',
+  MODIFIED: 'Changed',
+  CONFLICT: 'Conflict',
+  INVALID: 'Cannot be read as changes',
+  UNSUPPORTED_VERSION: 'Unsupported document version',
+  IDENTITY_MISMATCH: 'Belongs to another project',
+  MISSING: 'File is missing',
+  UNREADABLE: 'File cannot be read',
+  UNAVAILABLE: 'Workspace folder is unavailable',
+  ERROR: 'Monitoring failed'
+};
+
+// ---------------------------------------------------------------------------
 // Phase 5: STATUS.md and the project status
 // ---------------------------------------------------------------------------
 
