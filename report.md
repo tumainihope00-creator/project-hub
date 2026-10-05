@@ -2364,3 +2364,207 @@ What Phase 6 should decide before building:
 
 Not ready, and out of scope: anything requiring filesystem monitoring,
 `MAX_PATH` handling, or test-database isolation.
+
+---
+
+# PHASE 6 IMPLEMENTATION REPORT — PROJECT.md → DATABASE SYNCHRONIZATION
+
+Date: 2026-10-05 · Branch state: `64452e2` (`6-readiness`) plus this work ·
+Database: existing `projecthub` on PostgreSQL 18, schema up to date with all 7
+migrations, no writes to existing records.
+
+Most of Phase 6 was already implemented and committed in `6-readiness`. This pass
+closed the remaining gaps, added the missing acceptance tests, and documented the
+feature. Nothing was rebuilt and no existing feature was removed.
+
+## 1. FILES CHANGED
+
+```
+ README.md                                       |  84 ++++++++++-
+ backend/src/lib/projectDocumentParser.ts        |  16 +++
+ backend/src/lib/projectDocumentSyncService.ts   | 107 ++++++++++++++++++--
+ backend/tests/projectDocumentSync.test.ts       | 128 ++++++++++++++++++++++++
+ frontend/src/api/types.ts                       |   6 ++
+ frontend/src/components/ProjectDocumentCard.tsx |   6 +-
+ 6 files changed, 336 insertions(+), 11 deletions(-)
+```
+
+- `backend/src/lib/projectDocumentSyncService.ts` — added a structured result
+  (`success`, `changed`, `updatedFields`) to both preview and run; added
+  `[project-document-sync]` development logging for parse failures, refusals,
+  conflicts, unchanged documents, and applied changes; fixed
+  `projectDocumentSyncState()`, which returned `documentHash: null` instead of the
+  real hash, so the UI could not tell a modified file from a fresh one.
+- `backend/src/lib/projectDocumentParser.ts` — documented the existing
+  missing/blank/placeholder rule at the point where it is implemented (line 27-31).
+- `backend/tests/projectDocumentSync.test.ts` — four new acceptance tests (below).
+- `frontend/src/api/types.ts` — the three new result fields.
+- `frontend/src/components/ProjectDocumentCard.tsx` — result line now reports the
+  changed-field count, or "already synchronized" / "Nothing was applied".
+- `README.md` — a PROJECT.md synchronization section, the sub-route table, and an
+  accurate test summary.
+
+No new file was created, and nothing was deleted.
+
+## 2. DATABASE CHANGES
+
+**None. No migration was needed and none was written.**
+
+- `npx prisma migrate status`: 7 migrations found, database schema up to date.
+- All synchronization metadata (`projectDocumentHash`, `projectDocumentSyncedAt`,
+  `projectDocumentStateHash`, `projectDocumentAnalyzedAt`) already existed from
+  `20260930120000_project_document_sync`; the monitor columns from
+  `20261001120000_project_document_monitor` were left alone.
+- No `deleteMany`, no reset, no schema edit, no new database. Databases before and
+  after: `farmtool`, `postgres`, `projecthub` — identical.
+
+## 3. API CHANGES
+
+No new endpoint and no changed contract. The three Phase 6 endpoints already
+existed and are unchanged:
+
+```
+GET  /api/projects/:key/project-document/sync/state     read-only change detection
+POST /api/projects/:key/project-document/sync/preview   build a change set, write nothing
+POST /api/projects/:key/project-document/sync           apply the change set atomically
+```
+
+The response body of `preview` and `sync` gained three fields, all additive and
+backward compatible:
+
+| Field          | Type       | Meaning                                                  |
+| -------------- | ---------- | -------------------------------------------------------- |
+| `success`      | `boolean`  | `false` on parse errors, refusals and unacknowledged conflicts |
+| `changed`      | `boolean`  | `true` only when the transaction actually wrote something |
+| `updatedFields`| `string[]` | Sorted field/record names that were written               |
+
+## 4. UI CHANGES
+
+`frontend/src/components/ProjectDocumentCard.tsx` only. The three controls
+(Check, Preview, Synchronize) already existed; the result line now reads:
+
+- `PROJECT.md is already synchronized.` when `skipped === 'unchanged'`
+- `PROJECT.md synchronized — N field(s)/record(s) updated.` after an apply
+- `PROJECT.md synchronized — the document parsed cleanly and matched the project record.`
+  when a sync completed with nothing to write
+- `Nothing was applied.` otherwise
+
+No new page, route, or component.
+
+## 5. SYNCHRONIZATION BEHAVIOR
+
+Verified by the suite, not asserted by inspection:
+
+- **No changes** → `skipped: 'unchanged'`, nothing written.
+- **One field** → only that column changes.
+- **GitHub URL only** → `repositoryUrl` changes and `updatedFields` is exactly
+  `['repositoryUrl']`; name, slug, stage, description and idea are untouched.
+- **Several fields** → description, assumptions and repositoryUrl applied;
+  name, slug, stage, `isArchived`, motivation and `originalIdea` untouched.
+- **Missing section** → a removed `## Repository` and a blanked
+  `## Assumptions` (`_Not yet documented._`) leave the database values in place
+  and produce an empty change set.
+- **Unknown section** → ignored, sync still succeeds.
+- **Malformed Markdown** (front matter opened and never closed) → `success: false`,
+  `applied: null`, errors reported, database untouched, the broken file left
+  exactly as written, and the project synchronizable again once restored.
+- **Records missing from the document** → reported as `unmatchedDatabaseRecords`,
+  never deleted.
+- **Conflict** → refused unless acknowledged; a document whose project id does not
+  match is refused outright.
+- **Loop prevention** → a generated, never-edited document produces no work, and a
+  sync never rewrites the file it read.
+- **Lifecycle** → `STATUS.md`, `Status`, `Status Stage` and `Archived` are never
+  written by a sync.
+
+## 6. TESTS PERFORMED
+
+Four new tests, one per acceptance scenario that had no direct coverage:
+
+```
+15. a GitHub URL change touches only the GitHub URL   updates repositoryUrl and leaves every other field alone
+16. several edited fields update only those fields    writes the edited fields and leaves the rest of the record alone
+17. a missing section never clears the database       keeps values whose section was removed from the document
+18. malformed Markdown fails safely                   refuses to synchronize a document whose front matter is broken
+```
+
+Results:
+
+```
+backend  npx tsc -p tsconfig.json --noEmit      clean (exit 0)
+frontend npm run build   (tsc -b && vite build) clean, 84 modules, built in 3.06s
+backend  npm test                              Test Files 9 passed (9)
+                                                Tests 295 passed (295)
+                                                Duration 71.74s
+```
+
+291 tests passed before this pass; the four new ones make 295. No lint script is
+configured in this repository.
+
+**Database safety, measured rather than assumed.** `projecthub` was fingerprinted
+before any change (`row_to_json` over all 8 project rows) and again after **four**
+full suite runs:
+
+```
+PROJECTS IDENTICAL (8 rows, byte for byte)
+projects=8   activity_events=202   app_settings=1   PROJECTS_ROOT rows=0
+databases: farmtool, postgres, projecthub (unchanged)
+```
+
+The suite writes only `__TEST__` projects it creates and deletes, plus a
+`PROJECTS_ROOT` row it removes in `afterAll`; both are asserted by the suite itself.
+
+## 7. ISSUES FOUND AND FIXED
+
+1. **`projectDocumentSyncState()` reported `documentHash: null`** while
+   `modified` was computed correctly from the real hash. The UI therefore had no
+   way to show which document it was looking at. Fixed to return the actual hash.
+2. **The result carried no structured outcome.** A caller could not distinguish
+   "parsed but nothing to do" from "refused" from "applied 3 fields" without
+   reading prose. Added `success`, `changed`, `updatedFields`.
+3. **No sync-side logging.** Parse failures, refusals, conflicts and unchanged
+   documents were silent. Added `[project-document-sync]` logging for each outcome.
+4. **Four of the eight acceptance scenarios had no direct test** (GitHub-URL-only,
+   multiple fields, missing section, malformed Markdown). Added.
+5. **Stale limitation in this report.** Item 9 claims
+   `frontend/tsconfig.tsbuildinfo` is tracked; it is not — `.gitignore:9`
+   (`*.tsbuildinfo`) already ignores it and `git ls-files` does not list it. The
+   claim is corrected here; the earlier entry was out of date.
+
+Two things were attempted and abandoned, both recorded so they are not retried:
+
+- A disposable test database (`projecthub_p6_test`) was created for an earlier
+  attempt and then **dropped** at the user's request. The suite ultimately ran
+  against `projecthub` itself, with the fingerprint check above as the safeguard.
+- A second PostgreSQL instance on port 55432 failed with Windows error 487
+  (port mapping); the service was stopped and its data directory deleted.
+
+## 8. STATE BEFORE PHASE 7
+
+Phase 6 is complete and verified: 295 tests pass, backend typecheck and frontend
+production build are clean, and the eight pre-existing projects are byte-identical
+to their pre-work state after four full suite runs.
+
+What Phase 7 can rely on:
+
+- One document format, one parser, one change-set builder, one transactional
+  applier — with `success` / `changed` / `updatedFields` on every outcome.
+- A tested no-clear, no-delete, no-loop guarantee and a tested conflict path that
+  requires explicit acknowledgement.
+- `README.md` now documents the feature, its safety rules and its limitations.
+
+What Phase 7 should decide:
+
+- **Automatic application vs. notification.** The monitor currently *reports*
+  drift. Letting it write means it must inherit every guard above, including the
+  acknowledgement rule, and it needs a decision on what happens when the file
+  changes while a sync is running.
+- **Evidence storage.** Carried forward from Phase 5: evidence belongs in a table
+  related to the project, not inside `STATUS.md` or `PROJECT.md`.
+- **Migration for the 8 existing projects**, which still have no `STATUS.md`
+  (initialization remains explicit).
+- **Test-database isolation**, still open (limitation 2 above). The suite is safe
+  today only because it is self-cleaning and fingerprinted.
+
+Still out of scope and still open: `MAX_PATH` handling, the `PROJECT.md` read-path
+symlink gap, and the unauthenticated API.

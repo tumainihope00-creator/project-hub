@@ -209,6 +209,21 @@ Special sub-routes:
 - `GET /documents/:id/versions`, `PUT /documents/:id` with `content` — document versioning
 - `GET/POST/DELETE /features/:id/requirements[/:requirementId]` — link/unlink requirements
 
+PROJECT.md sub-routes (`/:key/project-document/...`):
+
+| Method | Path                     | Effect                                          |
+| ------ | ------------------------ | ----------------------------------------------- |
+| GET    | ``                       | Metadata: path, hash, modified flag             |
+| GET    | `/content`               | The current file                                |
+| POST   | ``                       | Project Hub writes the file (database → file)  |
+| POST   | `/regenerate`            | Rebuild the file from the record                |
+| GET    | `/sync/state`            | Read-only change detection                      |
+| POST   | `/sync/preview`          | Build a change set, write nothing               |
+| POST   | `/sync`                  | Apply the change set atomically                 |
+| GET    | `/monitor`               | Monitored state (drift, problems)               |
+| POST   | `/monitor/check`         | Re-read the file now                            |
+| POST   | `/monitor/dismiss`       | Hide the notification, keep the change          |
+
 ---
 
 ## Frontend workspace
@@ -220,6 +235,64 @@ Tasks, Milestones, Architecture, Decisions, Development, Prompts, Bugs, Testing,
 Deployments, Production, Documentation, Notes, Activity, Settings.
 
 A global quick-add palette and keyboard shortcuts are available from the layout.
+
+The **Project File** card on the Overview tab holds the document and its
+synchronization controls: **Check**, **Preview**, **Synchronize**, and **Regenerate**.
+
+---
+
+## PROJECT.md → database synchronization
+
+Every project folder has one generated `PROJECT.md` file. It is the human-readable
+mirror of the project record, and it is the only place the file is written from:
+Project Hub regenerates it from the database. The synchronization direction that
+Phase 6 adds is the other one — a hand-edited `PROJECT.md` can be applied back
+into the database.
+
+### Supported content
+
+The Overview fields and prose sections (`Description`, `Problem`, `Motivation`,
+`Assumptions`, `Inspiration`, `Initial Questions`, `V1 Scope`, `Repository`),
+plus the list sections: tasks, notes, requirements, features, issues, research
+entries, research questions, milestones, decisions, tech-stack entries, database
+tables, API endpoints, deployments, git references, and prompt history.
+
+`STATUS.md` is deliberately **not** part of this. Lifecycle state (`Status`,
+`Status Stage`, `Archived`) stays under Project Hub's explicit control and is
+never written by a sync — a document that claims otherwise is ignored.
+
+### Using it
+
+1. Edit the file in your editor.
+2. **Check** — reports whether the file has drifted from the database.
+3. **Preview** — returns the exact change set without writing anything.
+4. **Synchronize** — applies the change set in one transaction, and returns
+   `{ success, changed, updatedFields, applied, skipped }`.
+
+Synchronization is also available from the API (see the table above) and runs
+automatically through the monitor, which reports drift rather than writing.
+
+### Safety rules
+
+- **Never deletes.** A database record missing from the document is reported as
+  *unmatched*, never removed.
+- **Never clears.** A missing section, a blank field, or the `_Not yet
+  documented._` placeholder means "no opinion", so the database value is kept.
+- **Never partially applies.** All field updates and all record creations happen
+  in a single transaction; a failure rolls the whole thing back.
+- **Refuses conflicts.** If the database changed since the document was
+  generated, the sync is refused unless the caller acknowledges the conflict.
+- **Never loops.** After a sync the document hash is recorded, so an untouched
+  file produces no work, and a sync never rewrites the file it just read.
+
+### Limitations
+
+- Matching is by code or stable key where one exists (`T-12`, `ADR-03`, `FR-2`)
+  and otherwise by normalized title. Records without either are reported as
+  unmatched rather than guessed at.
+- Prose is not reformatted or reflowed; the parser only reads the sections it
+  knows about, and unknown sections are ignored instead of failing the sync.
+- Endpoint detail blocks are shown but not synchronized.
 
 ---
 
@@ -235,12 +308,21 @@ idea, portfolio search, stage changes + timeline, task codes/tags/completion, fo
 integrity, feature↔requirement linking, prompt and document versioning, research/decisions/
 tech-stack/issues/deployments creation, and the archive/reactivate lifecycle.
 
+`backend/tests/projectDocumentSync.test.ts` covers PROJECT.md → database
+synchronization: the eight acceptance scenarios (no changes, a single-field change,
+a GitHub-URL-only change, several fields at once, a missing section, an unknown
+section, malformed Markdown, and loop prevention), idempotency, conflict
+acknowledgement, identity stability, status protection, and deletion safety. Each
+test file uses a throwaway Projects Root, only `__TEST__` projects, and asserts
+that every pre-existing project row is byte-identical afterwards.
+
 ---
 
 ## Status
 
 Implemented phases: foundation, project management, knowledge, AI development, delivery,
-and history/portability — including tests and production builds for both apps.
+history/portability, and PROJECT.md ↔ database synchronization — including tests and
+production builds for both apps.
 
 ### Known limitations / future work
 

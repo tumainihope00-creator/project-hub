@@ -645,3 +645,131 @@ describe('14. API endpoint identity is method plus path', () => {
     ).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The Phase 6 acceptance scenarios, one test each.
+// ---------------------------------------------------------------------------
+
+describe('15. a GitHub URL change touches only the GitHub URL', () => {
+  it('updates repositoryUrl and leaves every other field alone', async () => {
+    const project = await createSyncProject(uniqueName('RepoOnly'), {
+      description: 'Description that must survive.',
+      repositoryUrl: 'https://github.com/example/old'
+    });
+    const before = await prisma.project.findUniqueOrThrow({ where: { id: project.id } });
+
+    let md = await readDoc(project);
+    md = md.replace('https://github.com/example/old', 'https://github.com/example/new');
+    await writeDoc(project, md);
+
+    const res = await sync(project.id);
+    expect(res.status).toBe(200);
+
+    const after = await prisma.project.findUniqueOrThrow({ where: { id: project.id } });
+    expect(after.repositoryUrl).toBe('https://github.com/example/new');
+    expect(after.description).toBe(before.description);
+    expect(after.name).toBe(before.name);
+    expect(after.slug).toBe(before.slug);
+    expect(after.stage).toBe(before.stage);
+    expect(after.v1Scope).toBe(before.v1Scope);
+    expect(after.originalIdea).toBe(before.originalIdea);
+
+    // The structured result names exactly one changed field.
+    expect(res.body.data.success).toBe(true);
+    expect(res.body.data.changed).toBe(true);
+    expect(res.body.data.updatedFields).toEqual(['repositoryUrl']);
+  });
+});
+
+describe('16. several edited fields update only those fields', () => {
+  it('writes the edited fields and leaves the rest of the record alone', async () => {
+    const project = await createSyncProject(uniqueName('MultiField'), {
+      description: 'Original description.',
+      motivation: 'Original motivation.',
+      repositoryUrl: 'https://github.com/example/original'
+    });
+    const before = await prisma.project.findUniqueOrThrow({ where: { id: project.id } });
+
+    let md = await readDoc(project);
+    md = setOverviewField(md, 'Description', 'Description from the document.');
+    md = setProseSection(md, 'Assumptions', 'Assumption written in the document.');
+    md = md.replace('https://github.com/example/original', 'https://github.com/example/edited');
+    await writeDoc(project, md);
+
+    const res = await sync(project.id);
+    expect(res.status).toBe(200);
+
+    const after = await prisma.project.findUniqueOrThrow({ where: { id: project.id } });
+    expect(after.description).toBe('Description from the document.');
+    expect(after.assumptions).toBe('Assumption written in the document.');
+    expect(after.repositoryUrl).toBe('https://github.com/example/edited');
+    // Untouched by the document: name, slug, stage, motivation, archive state, idea.
+    expect(after.name).toBe(before.name);
+    expect(after.slug).toBe(before.slug);
+    expect(after.stage).toBe(before.stage);
+    expect(after.isArchived).toBe(false);
+    expect(after.motivation).toBe(before.motivation);
+    expect(after.originalIdea).toBe(before.originalIdea);
+
+    expect([...res.body.data.updatedFields].sort()).toEqual([
+      'assumptions',
+      'description',
+      'repositoryUrl'
+    ]);
+  });
+});
+
+describe('17. a missing section never clears the database', () => {
+  it('keeps values whose section was removed from the document', async () => {
+    const project = await createSyncProject(uniqueName('MissingSection'), {
+      description: 'Database description that must survive.',
+      assumptions: 'Database assumption that must survive.',
+      repositoryUrl: 'https://github.com/example/keep-me'
+    });
+
+    let md = await readDoc(project);
+    // Remove `## Repository` entirely.
+    md = md.replace(/## Repository\n\n[\s\S]*?(?=\n\n## )/, '');
+    // Blank the assumptions section down to the generator's placeholder.
+    md = setProseSection(md, 'Assumptions', '_Not yet documented._');
+    await writeDoc(project, md);
+
+    const res = await sync(project.id);
+    expect(res.status).toBe(200);
+    expect(res.body.data.success).toBe(true);
+
+    const after = await prisma.project.findUniqueOrThrow({ where: { id: project.id } });
+    expect(after.repositoryUrl).toBe('https://github.com/example/keep-me');
+    expect(after.assumptions).toBe('Database assumption that must survive.');
+    expect(after.description).toBe('Database description that must survive.');
+    expect(res.body.data.projectChanges).toEqual([]);
+  });
+});
+
+describe('18. malformed Markdown fails safely', () => {
+  it('refuses to synchronize a document whose front matter is broken', async () => {
+    const project = await createSyncProject(uniqueName('Malformed'), { description: 'Untouched.' });
+    const original = await readDoc(project);
+
+    // A front matter block that is opened and never closed, then garbage.
+    await writeDoc(project, `---\np-hub-project-id: ${project.id}\n\n## Overview\n\n???\n`);
+
+    const res = await sync(project.id);
+    expect(res.status).toBe(200);
+    expect(res.body.data.success).toBe(false);
+    expect(res.body.data.applied).toBeNull();
+    expect(res.body.data.skipped).toBe('not_applicable');
+    expect(res.body.data.errors.length).toBeGreaterThan(0);
+
+    // The database is exactly as it was, and the broken file was not "fixed".
+    const after = await prisma.project.findUniqueOrThrow({ where: { id: project.id } });
+    expect(after.description).toBe('Untouched.');
+    expect(await readDoc(project)).toBe(`---\np-hub-project-id: ${project.id}\n\n## Overview\n\n???\n`);
+
+    // Restoring the document makes the project synchronizable again.
+    await writeDoc(project, original);
+    const recovered = await sync(project.id);
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.data.success).toBe(true);
+  });
+});

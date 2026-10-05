@@ -31,9 +31,46 @@ import { prisma } from './prisma.js';
  * and the engine reports `unchanged` with nothing to do. Because a sync never
  * rewrites PROJECT.md, and the document is only ever read here, the
  * DB -> document -> DB cycle cannot start.
+ *
+ * LOGGING. Every outcome gets one line on stdout/stderr with the `[project-document-sync]`
+ * prefix, so a synchronization is visible in the backend log without attaching a
+ * debugger. What is logged is deliberately limited to the project id and name, the
+ * counts, the field names, and the error codes: never the document content, never a
+ * field value, and never a path. `readAndBuild` itself is silent, because the card
+ * on the details page calls the state endpoint on every load and that would be
+ * noise rather than an event.
  */
 
+const LOG_PREFIX = '[project-document-sync]';
+
+function log(message: string, ...rest: unknown[]): void {
+  console.log(`${LOG_PREFIX} ${message}`, ...rest);
+}
+
+function logWarn(message: string, ...rest: unknown[]): void {
+  console.warn(`${LOG_PREFIX} ${message}`, ...rest);
+}
+
+/**
+ * The field names a change set touches: project column names first, then one
+ * `entity:key` entry per child record. Identical in shape to the `metadata` the
+ * activity event records, so the log line, the API response and the timeline can
+ * be compared by eye.
+ */
+function describeFields(projectChanges: ChangeSet['projectChanges'], childChanges: ChangeSet['childChanges']): string[] {
+  return [
+    ...projectChanges.map((c) => c.field),
+    ...childChanges.map((c) => `${c.entity}:${c.key}`)
+  ];
+}
+
 export interface PreviewResult {
+  /** False when the change set has errors and cannot be applied. */
+  success: boolean;
+  /** True when the change set would write at least one field or record. */
+  changed: boolean;
+  /** The fields this change set touches: project columns, then `entity:key` records. */
+  updatedFields: string[];
   projectId: number;
   projectName: string;
   relativePath: string;
@@ -142,7 +179,11 @@ async function readAndBuild(projectId: number): Promise<{
 }
 
 function toPreview(project: SyncProjectRow, changeSet: ChangeSet): PreviewResult {
+  const applicable = changeSet.errors.length === 0;
   return {
+    success: applicable,
+    changed: changeSet.projectChanges.length + changeSet.childChanges.length > 0,
+    updatedFields: describeFields(changeSet.projectChanges, changeSet.childChanges),
     projectId: project.id,
     projectName: project.name,
     relativePath: './PROJECT.md',
@@ -151,7 +192,7 @@ function toPreview(project: SyncProjectRow, changeSet: ChangeSet): PreviewResult
     unchanged: changeSet.unchanged,
     firstSynchronization: changeSet.firstSynchronization,
     conflict: changeSet.conflict,
-    applicable: changeSet.errors.length === 0,
+    applicable,
     projectChanges: changeSet.projectChanges,
     childChanges: changeSet.childChanges,
     unmatchedDatabaseRecords: changeSet.unmatchedDatabaseRecords,
@@ -167,7 +208,15 @@ function toPreview(project: SyncProjectRow, changeSet: ChangeSet): PreviewResult
  */
 export async function previewProjectDocumentSync(projectId: number): Promise<PreviewResult> {
   const { project, changeSet } = await readAndBuild(projectId);
-  return toPreview(project, changeSet);
+  const preview = toPreview(project, changeSet);
+  log(
+    `preview project ${project.id} (${project.name}): ` +
+      `${preview.applicable ? 'applicable' : 'refused'}, unchanged=${preview.unchanged}, ` +
+      `conflict=${preview.conflict}, fields=${preview.projectChanges.length}, ` +
+      `records=${preview.childChanges.length}` +
+      (preview.errors.length ? `, errors=[${preview.errors.map((e) => e.code).join(', ')}]` : '')
+  );
+  return preview;
 }
 
 export interface SyncRunResult extends PreviewResult {
@@ -193,15 +242,27 @@ export async function runProjectDocumentSync(
   const { project, changeSet } = await readAndBuild(projectId);
 
   if (changeSet.errors.length > 0) {
-    return { ...toPreview(project, changeSet), applied: null, skipped: 'not_applicable' };
+    const preview = toPreview(project, changeSet);
+    logWarn(
+      `sync refused for project ${project.id} (${project.name}): ` +
+        `[${preview.errors.map((e) => e.code).join(', ')}]. Nothing was applied.`
+    );
+    return { ...preview, success: false, applied: null, skipped: 'not_applicable' };
   }
 
   if (changeSet.conflict && !options.acknowledgeConflict) {
     // Surface the conflict as an error so the caller cannot miss it, and change
     // nothing. The user must explicitly choose to proceed.
     const preview = toPreview(project, changeSet);
+    logWarn(
+      `sync refused for project ${project.id} (${project.name}): the project record changed after the last ` +
+        `synchronization and the conflict was not acknowledged. Nothing was applied.`
+    );
     return {
       ...preview,
+      success: false,
+      changed: false,
+      updatedFields: [],
       applicable: false,
       applied: null,
       skipped: 'not_applicable',
@@ -217,15 +278,42 @@ export async function runProjectDocumentSync(
   }
 
   if (changeSet.unchanged) {
-    return { ...toPreview(project, changeSet), applied: null, skipped: 'unchanged' };
+    log(`sync project ${project.id} (${project.name}): the document has not changed since the last sync.`);
+    return {
+      ...toPreview(project, changeSet),
+      changed: false,
+      updatedFields: [],
+      applied: null,
+      skipped: 'unchanged'
+    };
   }
 
+  log(
+    `sync project ${project.id} (${project.name}): applying ` +
+      `${describeFields(changeSet.projectChanges, changeSet.childChanges).length} change(s)`
+  );
   const applied = await applyChangeSet(projectId, changeSet, { actor: options.actor ?? 'user' });
 
   // After applying, the file is now the last-synced state. Return a fresh preview
-  // so the UI shows the post-sync (unchanged) position.
+  // so the UI shows the post-sync (unchanged) position. `changed` and
+  // `updatedFields` describe what this run actually wrote, not what the
+  // post-sync preview can still see, so they are taken from `applied`.
   const after = await readAndBuild(projectId);
-  return { ...toPreview(after.project, after.changeSet), applied, skipped: null };
+  const updatedFields = [
+    ...applied.appliedProjectChanges.map((c) => c.field),
+    ...applied.appliedChildChanges.map((c) => `${c.entity}:${c.key}`)
+  ];
+  log(
+    `sync complete for project ${project.id}: ${updatedFields.length} field(s)/record(s) updated` +
+      (updatedFields.length ? ` [${updatedFields.join(', ')}]` : '')
+  );
+  return {
+    ...toPreview(after.project, after.changeSet),
+    changed: updatedFields.length > 0,
+    updatedFields,
+    applied,
+    skipped: null
+  };
 }
 
 /**
@@ -270,11 +358,13 @@ export async function projectDocumentSyncState(projectId: number): Promise<{
 
   let modified = false;
   let conflict = false;
+  let documentHash: string | null = null;
   try {
     const resolved = await resolveProjectDocumentPath({ folderPath: project.folderPath });
     if (resolved.available) {
       const content = await fsp.readFile(resolved.path.documentPath, 'utf8');
-      modified = hashContent(content) !== project.projectDocumentHash;
+      documentHash = hashContent(content);
+      modified = documentHash !== project.projectDocumentHash;
     }
     // Conflict: has the database moved since the last sync?
     const data = await loadProjectDocumentData(projectId);
@@ -283,11 +373,12 @@ export async function projectDocumentSyncState(projectId: number): Promise<{
   } catch {
     // A missing/unreadable file is "not modified"; the preview will explain it.
     modified = false;
+    documentHash = null;
   }
 
   return {
     projectId,
-    documentHash: null,
+    documentHash,
     lastSyncedHash: project.projectDocumentHash,
     lastSyncedAt: project.projectDocumentSyncedAt?.toISOString() ?? null,
     modified,

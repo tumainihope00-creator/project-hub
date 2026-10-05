@@ -20,6 +20,22 @@ import { PROJECT_DOCUMENT_FILENAME, PROJECT_DOCUMENT_VERSION } from './projectDo
  * Boundary note: `## Project Status` and the delivery/git/tag sections are parsed
  * only to the extent of noting that they exist and are NOT synchronized. STATUS.md
  * owns status; this phase never writes `stage`, `isArchived`, or dates.
+ *
+ * MISSING AND EMPTY SECTIONS (the conservative rule, deliberately chosen).
+ *
+ * The document format Project Hub generates has no way to say "clear this value".
+ * A section that is absent, a field that is blank, and the `_Not yet documented._`
+ * placeholder all mean the same thing to this parser: *nothing was expressed*, so
+ * the corresponding key is left out of the result entirely rather than being set to
+ * an empty string. The synchronization layer only ever writes a key that is present,
+ * so a blank `## Assumptions` cannot erase a non-empty `assumptions` column.
+ *
+ * The consequence is stated here because it is a real limitation, not an accident:
+ * there is currently no way to clear a project field from PROJECT.md. Clearing it
+ * means clearing it in Project Hub and regenerating the document. That is the
+ * safer of the two possible readings - a stray blank line must never be able to
+ * destroy data - but it is a deliberate choice, and a later phase that adds an
+ * explicit "clear" marker in the format should look here first.
  */
 
 /** One `## Heading` block and the raw lines under it, in document order. */

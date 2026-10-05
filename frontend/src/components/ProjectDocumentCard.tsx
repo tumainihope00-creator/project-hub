@@ -404,9 +404,11 @@ function ProjectDocumentSyncPanel({
       {lastResult ? (
         <div className="tiny dim" style={{ marginTop: 8 }}>
           {lastResult.skipped === 'unchanged'
-            ? 'Nothing to do: the document has not changed since the last sync.'
+            ? 'PROJECT.md is already synchronized.'
             : lastResult.applied
-              ? `Synchronized ${lastResult.applied.appliedProjectChanges.length} field(s) and ${lastResult.applied.appliedChildChanges.length} record(s).`
+              ? lastResult.changed
+                ? `PROJECT.md synchronized — ${lastResult.updatedFields.length} field(s)/record(s) updated.`
+                : 'PROJECT.md synchronized — the document parsed cleanly and matched the project record.'
               : 'Nothing was applied.'}
         </div>
       ) : null}

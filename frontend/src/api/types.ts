@@ -181,6 +181,12 @@ export interface ProjectDocumentUnmatchedRecord {
 
 /** The same shape the preview returns and the sync applies, so they cannot disagree. */
 export interface ProjectDocumentSyncPreview {
+  /** False when the change set has errors and nothing can be applied. */
+  success: boolean;
+  /** True when at least one field or record differs from the database. */
+  changed: boolean;
+  /** Project column names, then one `entity:key` entry per record. */
+  updatedFields: string[];
   projectId: number;
   projectName: string;
   relativePath: string;
