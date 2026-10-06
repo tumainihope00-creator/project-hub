@@ -303,6 +303,39 @@ model Project {
   projectDocumentDetectedAt DateTime?
   projectDocumentChangeState String?
   projectDocumentDismissedAt DateTime?
+  // Change-aware synchronization baseline (Phase 7).
+  //
+  // Phase 6 could only ask "did the whole project move?" using two hashes, which
+  // is enough to notice a conflict but not enough to describe one: a conflict has
+  // to be reported per field, with the three values that disagree. These columns
+  // hold that description.
+  //
+  //   projectDocumentBaseline       the last successfully synchronized state, field
+  //                           by field: what the database held and what the document
+  //                           said at the moment both agreed. Compared against the
+  //                           current database and the current document, this is
+  //                           what tells "the document changed" apart from "the
+  //                           database changed" apart from "both changed, in
+  //                           different fields, which is a merge" apart from "both
+  //                           changed the same field, which is a conflict".
+  //                           Nullable and never backfilled: null means "no
+  //                           baseline yet", and a project gets one on its first
+  //                           generate or synchronization - or, for a project that
+  //                           already differs, only after the difference has been
+  //                           resolved explicitly.
+  //   projectDocumentSyncState     the last classified synchronization state
+  //                           (synchronized, markdown_changed, database_changed,
+  //                           both_changed, conflict, error). Read-only
+  //                           bookkeeping for the UI.
+  //   projectDocumentSyncDirection which way the last synchronization moved data
+  //                           (MARKDOWN_TO_DATABASE, DATABASE_TO_MARKDOWN). Makes
+  //                           "who wrote this?" answerable from the record.
+  //   projectDocumentConflictFields  the fields currently in conflict, by name
+  //                           only. Values never live here.
+  projectDocumentBaseline Json?
+  projectDocumentSyncState String?
+  projectDocumentSyncDirection String?
+  projectDocumentConflictFields String[] @default([])
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 

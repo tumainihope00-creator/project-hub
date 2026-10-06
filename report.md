@@ -2568,3 +2568,245 @@ What Phase 7 should decide:
 
 Still out of scope and still open: `MAX_PATH` handling, the `PROJECT.md` read-path
 symlink gap, and the unauthenticated API.
+
+---
+
+# PHASE 7 IMPLEMENTATION REPORT - CHANGE-AWARE SYNCHRONIZATION & CONFLICT DETECTION
+
+## 1. FILES CHANGED
+
+9 modified, 3 new, 1 new migration directory.
+
+| File | Change |
+| ---- | ------ |
+| `backend/prisma/schema.prisma` | 4 new nullable columns on `projects` (+33 lines) |
+| `backend/prisma/migrations/20261005120000_project_document_sync_baseline/migration.sql` | new — additive `ALTER TABLE ... ADD COLUMN` |
+| `backend/src/lib/projectDocumentBaseline.ts` | new — baseline type, normalization, three-way classification, roll-up, baseline advancement |
+| `backend/src/lib/projectDocumentSync.ts` | `buildBaseline()`, shared field specs, baseline-aware `buildChangeSet()`/`diffRecord()`, `applyChangeSet()` writes the Phase 7 metadata + history inside its transaction (+407 lines) |
+| `backend/src/lib/projectDocumentSyncService.ts` | per-project lock, safe-partial apply, conflict gate, resolutions, status, history, generated-baseline capture (+963 lines) |
+| `backend/src/routes/projects.ts` | 2 new endpoints, baseline capture after create/generate/regenerate |
+| `backend/src/lib/projectDocumentMonitor.ts` | `conflictFieldNames` on the notification, conflict message names the fields |
+| `backend/tests/projectDocumentSync.test.ts` | the coarse "database moved" conflict test rewritten as a same-field conflict |
+| `backend/tests/projectDocumentSyncPhase7.test.ts` | new — 16 tests covering every acceptance scenario |
+| `frontend/src/api/types.ts` | sync state, classification, conflict, resolution, status and history types + label map |
+| `frontend/src/components/ProjectDocumentCard.tsx` | state label, conflict cards with per-field choices, kept-fields notice, lazy history |
+| `README.md` | decision table, baseline, resolution, safety rules, history, new routes, test coverage |
+
+## 2. DATABASE CHANGES
+
+One migration, additive only: four columns on `projects`.
+
+```sql
+ALTER TABLE "projects" ADD COLUMN "projectDocumentBaseline" JSONB;
+ALTER TABLE "projects" ADD COLUMN "projectDocumentSyncState" TEXT;
+ALTER TABLE "projects" ADD COLUMN "projectDocumentSyncDirection" TEXT;
+ALTER TABLE "projects" ADD COLUMN "projectDocumentConflictFields" TEXT[] DEFAULT ARRAY[]::TEXT[];
+```
+
+- No `DROP`, no `RENAME`, no backfill, no `UPDATE` of any existing row.
+- Applied with `prisma migrate deploy` after `prisma migrate status` reported it pending.
+- Existing data preservation asserted with a SHA-256 fingerprint of all 8 project rows
+  (id, slug, name, stage, description, problem, v1Scope, repositoryUrl, folderPath) plus
+  counts of 16 tables:
+
+  ```
+  before: 1fb102a175cd1cba3c7fc6a3e1d9582ea9aba68761bcb42b45d8a138161e1b5d
+  after:  1fb102a175cd1cba3c7fc6a3e1d9582ea9aba68761bcb42b45d8a138161e1b5d
+  counts: projects 8, tasks 18, notes 9, requirements 36, features 41, issues 44,
+          activity_events 202, milestones 11, research_entries 21, deployments 1,
+          app_settings 1, tags 17, architecture_decisions 15, tech_stack 9,
+          prompts 3, project_documents 2
+  ```
+- After the full suite: identical fingerprint, `testRows 0`, `baselinesSet 0` — no
+  pre-existing project was given a baseline by the test run.
+
+## 3. API CHANGES
+
+Added, under the existing `/:key/project-document/sync/` namespace:
+
+| Method | Path | Effect |
+| ------ | ---- | ------ |
+| `GET` | `/:key/project-document/sync/status` | Full preview + classified state + every conflicting value + up to 20 history entries. Never writes; a missing/unreadable document reports `state: 'unavailable'`. |
+| `POST` | `/:key/project-document/sync/resolve` | `{ resolutions: [{ field, scope, entity?, key?, choice, value? }] }` — applies the decisions in one transaction. |
+
+Extended responses (no route removed, no field removed):
+
+- `POST /sync/preview` and `POST /sync` gained `sync: { state, baseline, conflicts, conflictFields, markdownChanged, databaseChanged, modified, neverSynchronized, conflict }`.
+- `POST /sync` gained `applied.syncState`, `applied.conflictFields`.
+- `GET /sync/state` gained `state`, `conflictFields`, `baselineCapturedAt`.
+- `POST /sync` without `acknowledgeConflict` and with field conflicts now returns
+  `errors: [{ code: 'UNRESOLVED_CONFLICTS', ... }]` (was `UNACKNOWLEDGED_CONFLICT`,
+  which is still returned by the coarse path).
+- Monitor notifications gained `conflictFieldNames: string[]`.
+
+`acknowledgeConflict: true` is unchanged in meaning: PROJECT.md wins every
+conflicting field.
+
+## 4. UI CHANGES
+
+`ProjectDocumentCard.tsx`:
+
+- **Sync state row** now reads from the classified state with a per-state label,
+  and lists the conflicting field names.
+- **Conflict panel** (after Check / Preview): one card per conflicting field showing
+  the last agreed value, the project record value and the PROJECT.md value, with
+  three buttons — *Keep database* (default), *Keep PROJECT.md*, *Enter a value…* —
+  and an **Apply N decision(s)** button enabled once every conflict has a choice.
+- **Synchronize** is disabled while conflicts are outstanding, with a tooltip
+  pointing at the panel.
+- **Confirmation dialog** now lists the database fields that will be *kept* and says
+  they must be regenerated to appear in the document.
+- **Baseline notice** when no baseline is recorded: differences are reported, not applied.
+- **Synchronization history**: a toggle that lazily fetches `/sync/status` and lists
+  each run with its time, direction, fields written, fields held back, decisions and
+  actor.
+
+No panel was removed; Check, Preview, Synchronize, Regenerate, Generate, Open and
+the monitor banner all remain.
+
+## 5. SYNCHRONIZATION BEHAVIOR
+
+Three-way comparison per field (baseline / database / markdown), rolled up into
+`synchronized`, `markdown_changed`, `database_changed`, `both_changed`, `conflict`,
+`error` or `unavailable`.
+
+- `markdown_changed` → written; `database_changed` → kept and reported;
+  `both_changed` → nothing to do; `conflict` → withheld until decided.
+- **Different fields are not a conflict.** A document change to `problem` and a
+  record change to `description` are both applied in one transaction.
+- **Same field, different value** → nothing is applied until each field is decided.
+  Choices: `database` (record wins, file untouched), `markdown` (document wins),
+  `manual` (caller-supplied value). Decisions apply together atomically.
+- **Baseline** (`projectDocumentBaseline`) is captured on create/generate/regenerate
+  (route-level hook, so `projectDocument.ts` never imports the sync engine) and
+  advanced after a successful sync — never past a field still in conflict.
+- **No baseline** → differences are conflicts, never applied; the baseline is
+  recorded on the first pass that finds the two in agreement.
+- **History** is one `ActivityEvent` per run (`relatedType: 'ProjectDocumentSync'`,
+  `type: 'PROJECT_UPDATED'`), written inside the apply transaction, carrying
+  direction, state, written/kept/conflicting fields, decisions and actor. No new
+  enum value, no new table.
+- **Concurrency**: the file is re-hashed immediately before applying (`DOCUMENT_CHANGED_DURING_SYNC`
+  on mismatch), and a per-project promise chain serializes syncs.
+- **Failed apply** writes nothing at all, including no baseline and no metadata.
+- A sync still never rewrites PROJECT.md; bringing the file back in line is an
+  explicit Regenerate. `STATUS.md` is untouched by every path in this phase.
+
+## 6. TESTS PERFORMED
+
+```
+npx prisma validate                              → valid
+npx prisma migrate status                        → 8 migrations, 1 pending (ours)
+npx prisma migrate deploy                        → applied
+npx tsc -p tsconfig.json --noEmit                → clean
+npm test (backend)                               → 10 files, 311 tests passed
+npx prisma migrate status                        → 8 migrations, none pending
+frontend: npm run build (tsc -b && vite build)   → clean
+DB fingerprint after all of the above            → identical to Phase 6 baseline
+```
+
+Test counts: Phase 6 suite 31 (all still passing after the engine rewrite), Phase 7
+suite 16 (new), total 311 across 10 files. The suite runs against `projecthub` with
+`__TEST__` fixtures that delete themselves; `testRows 0` after every run.
+
+Phase 7 suite contents:
+
+1. no changes on either side → `synchronized`, nothing applied
+2. only PROJECT.md changed → applied, baseline advances
+3. only the record changed → kept, reported, file not rewritten
+4. both changed to the same value → `both_changed`, no conflict, no write
+5. same field changed differently → conflict with all three values, refused, then resolved
+6. different fields changed → both applied together, record's change preserved
+7. multiple conflicts → listed separately, resolved one at a time, manual value used
+8. Hub-generated document → baseline captured, no false conflict, next edit recognized
+9. AI rewrite (whitespace, provenance comment, two rewritten fields) → only real value changes reported
+10. project predating the baseline → reported, refused while divergent, baseline established by resolution
+11. failed sync (duplicate document identity) → nothing applied; resolve refused too
+12. rapid consecutive edits and two racing syncs → final state matches the file, no partial state
+13. resolution choices (database / markdown / manual), stale resolution refused, manual value required
+14. history recorded with direction, decisions, and on the activity timeline
+
+## 7. ISSUES FOUND AND FIXED
+
+1. **Four Phase 6 tests failed after the engine rewrite** — all four were artifacts
+   of the old coarse model, not regressions:
+   - Three `skipped: 'unchanged'` cases returned `null`, because a project that had
+     no baseline yet took the "adopt baseline" path even when there was nothing to
+     adopt. Fixed by only taking that path when a baseline is genuinely new; the
+     "nothing to write" path now re-reads so the returned preview shows the state it
+     just recorded.
+   - The conflict test changed `problem` in the record and `description` in the file —
+     which under field-level comparison is a safe merge, not a conflict. Rewritten as a
+     genuine same-field conflict, which is what Phase 6's intent always was.
+2. **`classifyField` gained `baselineKnown` after it was written** — four call sites
+   used the shorthand `baselineKnown` with no value in scope; added the flag and a
+   default `baseline = null` on `buildChangeSet` so a caller cannot accidentally omit it.
+3. **`sameValue` became dead code** once classification moved into the baseline
+   module. Removed rather than left as a second, subtly different comparison.
+4. **`prisma generate` was stale** after the schema edit (`projectDocumentSyncState`
+   not in the update type). Regenerated with `PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1`.
+5. **Baseline shape mismatch** — `setBaselineValue` wrote a flat `records[entity:key]`
+   map against a three-level `records[entity][key][field]` type. Corrected.
+6. **Stale `state` cached after a decision** — `recordSyncOutcome` wrote the state the
+   engine believed *before* the resolution, so the card's badge disagreed with the
+   preview the user had just received. The state is now written from the fresh
+   comparison after the decisions.
+7. **Baseline not advanced when nothing was written** — a `both_changed` run wrote
+   nothing, so the baseline never moved and the state stayed `both_changed` forever.
+   Fixed by advancing only when there are no conflicts *and* no database-only changes
+   (advancing there would claim the document agrees with a value it does not contain).
+8. **A generated HTML comment before the front matter broke the AI-rewrite test** —
+   the parser (correctly) requires the front matter first, so the test's provenance
+   comment moved below it, where a real assistant would put it.
+
+## 8. STATE AFTER PHASE 7
+
+- **Complete:** baseline storage, six-verdict classification, safe merges, per-field
+  conflict resolution (three choices), transactional apply including baseline and
+  metadata, history on the activity timeline, generated-baseline capture, concurrency
+  guard and per-project lock, monitor conflict reporting with field names, status and
+  resolve endpoints, UI state/conflicts/choices/history, README, 16 new tests.
+- **Preserved from earlier phases:** every Phase 6 route and its semantics, no-delete
+  and no-clear rules, protected columns, no automatic writes from the monitor,
+  `STATUS.md` separation, the Phase 4 generate/regenerate flow.
+- **Existing data:** 8 projects, byte-identical fingerprint, no baselines invented for
+  them; they report honestly until a user or a pass through the sync adopts one.
+- **Migration count:** 8 (was 7).
+- **Verification:** backend typecheck clean, 311/311 tests, frontend production build
+  clean, database unchanged.
+
+## 9. EXISTING DATA PRESERVATION
+
+Asserted, not claimed:
+
+- Fingerprint before migration, after migration, and after the full suite: identical.
+- Table counts unchanged across all 16 tables checked.
+- No `__TEST__` project and no extra database survive the run (`testRows 0`).
+- The suite's own `afterAll` re-fingerprints every project row excluding its own
+  fixtures and fails the run if anything differs.
+- `appSettings` `PROJECTS_ROOT` is restored to zero rows afterwards.
+- No test, route or background job writes to a project that is not `__TEST__`.
+
+## 10. PHASE 8 PLAN
+
+Recommended order, each step independently verifiable:
+
+1. **Adopt baselines for existing projects.** A one-time, explicit, idempotent
+   operation that reads each existing project's document and, where file and record
+   already agree, records the baseline — so the 8 real projects get the Phase 7
+   behavior without waiting for their first edit. Needs an API/command and a test
+   asserting no data change.
+2. **Bring the document in line on a `database` decision.** Resolving a conflict in
+   the record's favor currently leaves the file stale on purpose; the follow-up is an
+   opt-in "regenerate just these fields" (or a whole-file regenerate confirmation)
+   so the loop closes in one click. Must keep the no-automatic-rewrite rule.
+3. **History beyond 20 entries and richer rendering** — pagination for the timeline
+   and grouping repeated runs, before the history list becomes unreadable.
+4. **Record-level conflict UI** — conflicts on child records (entity + key + label)
+   are classified and resolvable through the API today, but the card renders the
+   field name only; extend the conflict card to show the record identity.
+5. **Background re-analysis of already-detected changes** so the monitor's
+   `conflictFieldNames` are current without a manual Check.
+6. **Workspace portability follow-ups**: the known limitations (folder moved or
+   deleted, symlinked root, unauthenticated API) are unchanged by this phase and
+   still open.

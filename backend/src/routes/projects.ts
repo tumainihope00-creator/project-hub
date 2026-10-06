@@ -15,6 +15,9 @@ import {
 import {
   previewProjectDocumentSync,
   projectDocumentSyncState,
+  projectDocumentSyncStatus,
+  recordGeneratedBaseline,
+  resolveProjectDocumentConflicts,
   runProjectDocumentSync
 } from '../lib/projectDocumentSyncService.js';
 import {
@@ -235,6 +238,11 @@ router.post('/', async (req, res, next) => {
     try {
       const written = await writeProjectDocument(project, { overwrite: false });
       documentStatus = written.status;
+      // Phase 7: the document was just rendered from the database, so the two
+      // sides agree by definition. Recording that agreement is what lets the first
+      // user edit be recognised as a change instead of being reported as a conflict
+      // against a baseline that never existed.
+      await recordGeneratedBaseline(project.id);
     } catch (err) {
       const e = err as ApiError;
       documentWarning = {
@@ -439,6 +447,7 @@ router.post('/:key/project-document', async (req, res, next) => {
   try {
     const project = await resolveProject(req.params.key);
     const result = await writeProjectDocument(project, { overwrite: false });
+    await recordGeneratedBaseline(project.id);
     res.status(201).json({ data: result.status, bytes: result.bytes, replaced: false });
   } catch (e) {
     next(e);
@@ -469,9 +478,15 @@ router.post('/:key/project-document/regenerate', async (req, res, next) => {
       // Regenerating something that is not there is just creating it, and it
       // would be surprising to report a replacement that replaced nothing.
       const created = await writeProjectDocument(project, { overwrite: false });
+      await recordGeneratedBaseline(project.id);
       return res.status(201).json({ data: created.status, bytes: created.bytes, replaced: false });
     }
     const result = await writeProjectDocument(project, { overwrite: true });
+    // A regeneration discards manual edits and re-establishes agreement, so the
+    // baseline moves to the file just written. Without this the next preview would
+    // compare the new document against the old agreement and call every difference
+    // a conflict.
+    await recordGeneratedBaseline(project.id);
     res.json({ data: result.status, bytes: result.bytes, replaced: true });
   } catch (e) {
     next(e);
@@ -479,14 +494,16 @@ router.post('/:key/project-document/regenerate', async (req, res, next) => {
 });
 
 // --------------------------------------------------------------------------
-// PROJECT.md -> database synchronization (Phase 6)
+// PROJECT.md -> database synchronization (Phase 6) and conflict resolution (Phase 7)
 //
-// Three explicit, user-triggered endpoints. None of them accepts a path: the
+// Five explicit, user-triggered endpoints. None of them accepts a path: the
 // document is located from the stored workspace exactly as Phase 4 does.
 //
 //   GET  /:key/project-document/sync/state   read-only change detection
 //   POST /:key/project-document/sync/preview build a change set, write nothing
 //   POST /:key/project-document/sync         apply the change set atomically
+//   GET  /:key/project-document/sync/status  state + every conflict + history
+//   POST /:key/project-document/sync/resolve decide conflicts field by field
 //
 // There is no watcher, no timer and no implicit call to any of these. STATUS.md is
 // not read here and `projects.stage` is never written by this block.
@@ -526,9 +543,11 @@ router.post('/:key/project-document/sync/preview', async (req, res, next) => {
 /**
  * Synchronize: apply the document to the database in one transaction.
  *
- * `acknowledgeConflict: true` is required when the database changed after the last
- * synchronization. It is not optional and not inferred: the server will not let a
- * document overwrite newer database data silently.
+ * `acknowledgeConflict: true` is required when fields are in conflict. It is not
+ * optional and not inferred: the server will not let a document overwrite newer
+ * database data silently, and it will not let a conflict be resolved by guessing.
+ * Prefer `POST .../sync/resolve`, which decides each conflicting field on its own;
+ * this flag remains as the blunt "PROJECT.md wins everywhere" choice.
  */
 router.post('/:key/project-document/sync', async (req, res, next) => {
   try {
@@ -549,6 +568,80 @@ router.post('/:key/project-document/sync', async (req, res, next) => {
     // re-report the change the user just applied. Only on a real apply: an
     // unchanged or refused synchronization leaves the document still outstanding.
     if (result.applied) {
+      await markProjectSynchronized(project.id);
+    }
+    res.json({ data: result });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * The synchronization status: the classified state, every conflicting field with
+ * both values and the baseline that preceded them, what is safe to apply, what the
+ * database moved on its own, and the recent history.
+ *
+ * Read-only, and safe to call on every page load: a project with no readable
+ * document reports `state: 'unavailable'` with the reason rather than failing, and
+ * a project that predates synchronization reports no baseline instead of pretending
+ * it has one.
+ */
+router.get('/:key/project-document/sync/status', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    res.json({ data: await projectDocumentSyncStatus(project.id) });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Resolve conflicting fields, one by one, and apply the decisions in one
+ * transaction.
+ *
+ *   POST /:key/project-document/sync/resolve
+ *   { resolutions: [ { field, scope, entity?, key?, choice, value? } ] }
+ *
+ * `choice` is `database` (keep the project record), `markdown` (keep PROJECT.md) or
+ * `manual` (write the supplied `value`). Fields that are not listed stay in
+ * conflict and are reported again, so a partially resolved set is a state the UI
+ * can show rather than an error.
+ *
+ * The document is re-read and re-classified first, so a resolution for a field
+ * that is no longer in conflict is refused rather than silently applied - the
+ * common case is the user resolving a conflict list that an earlier edit has since
+ * made irrelevant.
+ */
+router.post('/:key/project-document/sync/resolve', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const parsed = z
+      .object({
+        resolutions: z
+          .array(
+            z
+              .object({
+                field: z.string().min(1),
+                scope: z.enum(['project', 'record']),
+                entity: z.string().min(1).nullish(),
+                key: z.string().min(1).nullish(),
+                choice: z.enum(['database', 'markdown', 'manual']),
+                value: z.string().nullish()
+              })
+              .strict()
+          )
+          .min(1)
+      })
+      .strict()
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      throw badRequest('The conflict resolution request body was not understood.', {
+        received: req.body ?? {},
+        problems: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`)
+      });
+    }
+    const result = await resolveProjectDocumentConflicts(project.id, parsed.data.resolutions);
+    if (result.applied || result.updatedFields.length > 0) {
       await markProjectSynchronized(project.id);
     }
     res.json({ data: result });

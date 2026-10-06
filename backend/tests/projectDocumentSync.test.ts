@@ -371,33 +371,47 @@ describe('7. loop prevention', () => {
 // ---------------------------------------------------------------------------
 
 describe('8. conflict handling', () => {
-  it('refuses to sync without acknowledgement when the database moved', async () => {
+  /**
+   * Phase 6 asked "did the database move?". Phase 7 asks "did *this field* move,
+   * and did the other side move it too?" - so the scenario below is a same-field
+   * conflict. The different-field case, where both sides changed something and the
+   * two changes combine safely, is tested in the Phase 7 suite instead.
+   */
+  it('refuses to sync without acknowledgement when the same field moved on both sides', async () => {
     const project = await createSyncProject(uniqueName('Conflict'), { description: 'Start.' });
     let md = await readDoc(project);
     md = setOverviewField(md, 'Description', 'Doc version.');
     await writeDoc(project, md);
     await sync(project.id);
 
-    // Now change the database directly, simulating a change made elsewhere.
-    await prisma.project.update({ where: { id: project.id }, data: { problem: 'Moved on.' } });
+    // Now change the database directly, simulating a change made elsewhere - on the
+    // very same field the document is about to change again.
+    await prisma.project.update({ where: { id: project.id }, data: { description: 'Moved on.' } });
 
     // Edit the document again so the document hash differs too.
     md = await readDoc(project);
     md = setOverviewField(md, 'Description', 'Doc version 2.');
     await writeDoc(project, md);
 
+    const previewed = await preview(project.id);
+    expect(previewed.body.data.sync.conflictFields).toEqual(['description']);
+
     const refused = await sync(project.id);
     expect(refused.status).toBe(200);
     expect(refused.body.data.applied).toBeNull();
     expect(refused.body.data.skipped).toBe('not_applicable');
-    expect(
-      refused.body.data.errors.some((e: any) => e.code === 'UNACKNOWLEDGED_CONFLICT')
-    ).toBe(true);
+    expect(refused.body.data.errors.some((e: any) => e.code === 'UNRESOLVED_CONFLICTS')).toBe(true);
 
-    // With explicit acknowledgement it proceeds.
+    // Nothing was written while the conflict stood.
+    const held = await prisma.project.findUnique({ where: { id: project.id } });
+    expect(held!.description).toBe('Moved on.');
+
+    // With explicit acknowledgement the document wins.
     const forced = await sync(project.id, { acknowledgeConflict: true });
     expect(forced.status).toBe(200);
     expect(forced.body.data.applied).not.toBeNull();
+    const won = await prisma.project.findUnique({ where: { id: project.id } });
+    expect(won!.description).toBe('Doc version 2.');
   });
 });
 

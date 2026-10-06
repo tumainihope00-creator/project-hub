@@ -220,6 +220,8 @@ PROJECT.md sub-routes (`/:key/project-document/...`):
 | GET    | `/sync/state`            | Read-only change detection                      |
 | POST   | `/sync/preview`          | Build a change set, write nothing               |
 | POST   | `/sync`                  | Apply the change set atomically                 |
+| GET    | `/sync/status`           | State, every conflict value, and history        |
+| POST   | `/sync/resolve`          | Decide conflicting fields, then apply            |
 | GET    | `/monitor`               | Monitored state (drift, problems)               |
 | POST   | `/monitor/check`         | Re-read the file now                            |
 | POST   | `/monitor/dismiss`       | Hide the notification, keep the change          |
@@ -261,16 +263,48 @@ tables, API endpoints, deployments, git references, and prompt history.
 `Status Stage`, `Archived`) stays under Project Hub's explicit control and is
 never written by a sync — a document that claims otherwise is ignored.
 
+### How a difference is decided
+
+Synchronization compares three things, not two: the file, the project record, and
+a **baseline** — the last value the two sides agreed on, stored as JSON on the
+project row. Every compared field gets one verdict:
+
+| Verdict | Meaning |
+| ------- | ------- |
+| `unchanged` | Nothing moved since the baseline. |
+| `markdown_changed` | Only PROJECT.md moved. Safe to apply. |
+| `database_changed` | Only the record moved. Kept; regenerate to catch up. |
+| `both_changed` | Both moved **to the same value**. No conflict, no write. |
+| `conflict` | Both moved the same field to **different** values. |
+
+The state shown to the user is rolled up from those verdicts: `synchronized`,
+`markdown_changed`, `database_changed`, `both_changed`, `conflict`, `error`, or
+`unavailable`. Changing a different field on each side is therefore not a conflict —
+both changes are applied in one transaction. Only the same field, differently, needs
+a decision.
+
+The baseline is captured when Project Hub writes the document itself (create,
+generate, regenerate), and advanced after each successful synchronization. A project
+that predates this phase has no baseline: differences are then reported as conflicts
+rather than applied, and the baseline is recorded on the first pass that finds the
+two in agreement.
+
 ### Using it
 
 1. Edit the file in your editor.
-2. **Check** — reports whether the file has drifted from the database.
-3. **Preview** — returns the exact change set without writing anything.
-4. **Synchronize** — applies the change set in one transaction, and returns
-   `{ success, changed, updatedFields, applied, skipped }`.
+2. **Check / Preview** — returns the classified change set without writing anything,
+   including every conflicting value side by side.
+3. **Synchronize** — applies the safe changes in one transaction. If any field is in
+   conflict, nothing is applied until each one is decided.
+4. **Decide conflicts** — per field: *Keep database*, *Keep PROJECT.md*, or enter a
+   value. The decisions are applied together, in one transaction.
 
-Synchronization is also available from the API (see the table above) and runs
-automatically through the monitor, which reports drift rather than writing.
+`acknowledgeConflict: true` on `POST /sync` remains supported and means "PROJECT.md
+wins everywhere". The response of every one of these carries the classified state, the
+conflicts, and (on `/sync/status`) the recent history.
+
+Synchronization is also available from the API and runs automatically through the
+monitor, which reports drift rather than writing.
 
 ### Safety rules
 
@@ -278,12 +312,27 @@ automatically through the monitor, which reports drift rather than writing.
   *unmatched*, never removed.
 - **Never clears.** A missing section, a blank field, or the `_Not yet
   documented._` placeholder means "no opinion", so the database value is kept.
-- **Never partially applies.** All field updates and all record creations happen
-  in a single transaction; a failure rolls the whole thing back.
-- **Refuses conflicts.** If the database changed since the document was
-  generated, the sync is refused unless the caller acknowledges the conflict.
-- **Never loops.** After a sync the document hash is recorded, so an untouched
-  file produces no work, and a sync never rewrites the file it just read.
+- **Never partially applies.** All field updates, all record creations and all
+  conflict decisions happen in a single transaction; a failure rolls the whole
+  thing back, including the baseline it would have written.
+- **Never guesses at a conflict.** A field changed on both sides is withheld until
+  the caller decides. A field changed only in the document is applied; a field
+  changed only in the record is kept and reported.
+- **Never trusts a stale read.** The file is re-read and re-hashed immediately
+  before applying; if it changed in between, nothing is written and the newer file
+  is asked for again. One synchronization runs at a time per project.
+- **Never loops.** After a sync the document hash is recorded, so an untouched file
+  produces no work, and a sync never rewrites the file it just read. Keeping the
+  database value leaves the file as it is — bringing the document back in line is
+  an explicit *Regenerate*.
+
+### History
+
+Each synchronization writes one row to the project's activity timeline, inside the
+same transaction, recording the direction, the fields it wrote, the fields it kept
+from the database, the conflicts it held back, and any decisions made about them.
+There is no separate audit table for this: the timeline is the history, and
+`GET /sync/status` reads it back.
 
 ### Limitations
 
@@ -316,13 +365,19 @@ acknowledgement, identity stability, status protection, and deletion safety. Eac
 test file uses a throwaway Projects Root, only `__TEST__` projects, and asserts
 that every pre-existing project row is byte-identical afterwards.
 
+`backend/tests/projectDocumentSyncPhase7.test.ts` covers the change-aware
+comparison: each of the six verdicts, per-field conflict resolution (keep database,
+keep PROJECT.md, manual), projects that predate the baseline, generated and AI-edited
+documents, a failed synchronization applying nothing, rapid consecutive edits,
+and the recorded history.
+
 ---
 
 ## Status
 
 Implemented phases: foundation, project management, knowledge, AI development, delivery,
-history/portability, and PROJECT.md ↔ database synchronization — including tests and
-production builds for both apps.
+history/portability, PROJECT.md ↔ database synchronization, and change-aware PROJECT.md
+monitoring and synchronization — including tests and production builds for both apps.
 
 ### Known limitations / future work
 

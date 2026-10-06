@@ -145,6 +145,12 @@ export interface DocumentChangeNotification {
   recordUpdateCount: number;
   changedFieldNames: string[];
   changedEntityNames: string[];
+  /**
+   * Phase 7: the fields that changed on both sides and need an explicit decision.
+   * Names only - the values are on the synchronization status endpoint. Empty for
+   * every state except `CONFLICT`.
+   */
+  conflictFieldNames: string[];
   /** The file's bytes differ from the synchronized version but no record does. */
   noRecordDifferences: boolean;
   warnings: MonitorIssue[];
@@ -516,12 +522,15 @@ async function classify(projectId: number, documentHash: string): Promise<Classi
   }
 
   if (preview.conflict) {
+    const names = preview.sync.conflictFields;
     return {
       state: 'CONFLICT',
       documentHash,
       preview,
       message:
-        'This project was changed in Project Hub after the document was last synchronized, and PROJECT.md was also changed. Review both before synchronizing.',
+        names.length > 0
+          ? `${plural(names.length, 'field')} changed in both Project Hub and PROJECT.md and need a decision: ${names.join(', ')}.`
+          : 'This project was changed in Project Hub after the document was last synchronized, and PROJECT.md was also changed. Review both before synchronizing.',
       issues: { warnings, errors }
     };
   }
@@ -586,6 +595,7 @@ function toNotification(
     recordUpdateCount: updates,
     changedFieldNames: fieldNames,
     changedEntityNames: entityNames,
+    conflictFieldNames: preview ? preview.sync.conflictFields : [],
     noRecordDifferences: result.state === 'MODIFIED' && recordCount === 0 && fieldCount === 0,
     warnings: result.issues.warnings,
     errors: result.issues.errors,
@@ -1012,6 +1022,7 @@ async function establishBaseline(reg: Registration): Promise<void> {
       recordUpdateCount: 0,
       changedFieldNames: [],
       changedEntityNames: [],
+      conflictFieldNames: [],
       noRecordDifferences: false,
       warnings: [],
       errors: [],
@@ -1212,6 +1223,7 @@ export async function dismissProjectChange(projectId: number): Promise<DocumentC
         recordUpdateCount: 0,
         changedFieldNames: [],
         changedEntityNames: [],
+        conflictFieldNames: [],
         noRecordDifferences: false,
         warnings: [],
         errors: [],

@@ -150,8 +150,14 @@ export interface ProjectDocumentSyncState {
   lastSyncedAt: string | null;
   modified: boolean;
   neverSynchronized: boolean;
-  /** The database moved after the last synchronization. */
+  /** At least one field is in conflict. */
   conflict: boolean;
+  /** Phase 7: the classified state, for one badge instead of several booleans. */
+  state: ProjectDocumentSyncStatusState;
+  /** Phase 7: the fields that need a decision. Empty unless there is a conflict. */
+  conflictFields: string[];
+  /** Phase 7: when the agreement this comparison used was recorded. */
+  baselineCapturedAt: string | null;
 }
 
 export interface ProjectDocumentSyncIssue {
@@ -177,6 +183,82 @@ export interface ProjectDocumentUnmatchedRecord {
   entity: string;
   key: string;
   label: string;
+}
+
+/**
+ * The classified synchronization state.
+ *
+ * Each state names a different situation with a different fix, so they are kept
+ * apart rather than collapsed into "modified" / "conflict":
+ *
+ *  - `synchronized`      nothing to do.
+ *  - `markdown_changed`  only PROJECT.md moved. Safe to apply.
+ *  - `database_changed`  only the project record moved. Kept; regenerate to catch up.
+ *  - `both_changed`      both moved, to the same value. No conflict, no write.
+ *  - `conflict`          both moved the same field to different values. Needs a decision.
+ *  - `error`             the document has problems. Reported, never guessed at.
+ *  - `unavailable`       there is no readable document to compare.
+ */
+export type ProjectDocumentSyncStatusState =
+  | 'synchronized'
+  | 'markdown_changed'
+  | 'database_changed'
+  | 'both_changed'
+  | 'conflict'
+  | 'error'
+  | 'unavailable';
+
+/** Which way data moved in one synchronization. */
+export type ProjectDocumentSyncDirection =
+  | 'MARKDOWN_TO_DATABASE'
+  | 'DATABASE_TO_MARKDOWN'
+  | 'CONFLICT_RESOLUTION';
+
+/** One field that changed on both sides and needs an explicit decision. */
+export interface ProjectDocumentConflict {
+  /** Column name, e.g. `description`. */
+  field: string;
+  scope: 'project' | 'record';
+  entity: string | null;
+  key: string | null;
+  label: string | null;
+  /** What the two sides last agreed on. Null when no agreement was recorded. */
+  baseline: string | null;
+  databaseValue: string | null;
+  markdownValue: string | null;
+}
+
+/**
+ * The Phase 7 half of every preview, status and synchronization response.
+ *
+ * This is the part that answers "what is safe, what is held back, and why".
+ */
+export interface ProjectDocumentSyncClassification {
+  state: ProjectDocumentSyncStatusState;
+  baseline: { available: boolean; capturedAt: string | null; documentHash: string | null };
+  conflicts: ProjectDocumentConflict[];
+  conflictFields: string[];
+  /** Fields only PROJECT.md changed. Safe to apply. */
+  markdownChanged: string[];
+  /** Fields only the project record changed. Kept as they are. */
+  databaseChanged: string[];
+  modified: boolean;
+  neverSynchronized: boolean;
+  conflict: boolean;
+}
+
+/** One past synchronization, read back from the project timeline. */
+export interface ProjectDocumentSyncHistoryEntry {
+  at: string | null;
+  direction: ProjectDocumentSyncDirection | null;
+  state: string | null;
+  applied: string[];
+  databaseKept: string[];
+  conflicts: string[];
+  resolutions: { target: string; choice: string }[];
+  warnings: number;
+  actor: string | null;
+  description: string;
 }
 
 /** The same shape the preview returns and the sync applies, so they cannot disagree. */
@@ -205,6 +287,7 @@ export interface ProjectDocumentSyncPreview {
   errors: ProjectDocumentSyncIssue[];
   unsupportedSections: string[];
   preservedDetailSections: { section: string; reason: string }[];
+  sync: ProjectDocumentSyncClassification;
 }
 
 /** The preview plus the outcome of the synchronization that was applied. */
@@ -215,15 +298,57 @@ export interface ProjectDocumentSyncResult extends ProjectDocumentSyncPreview {
     unmatchedDatabaseRecords: ProjectDocumentUnmatchedRecord[];
     warnings: ProjectDocumentSyncIssue[];
     syncedAt: string;
+    syncState: ProjectDocumentSyncStatusState;
+    conflictFields: string[];
   } | null;
   /** Why nothing was applied, when applicable. */
   skipped: 'unchanged' | 'not_applicable' | null;
 }
 
+/**
+ * Everything the details page needs about synchronization in one response: the
+ * preview, the classified state with every conflicting value, and the history.
+ */
+export interface ProjectDocumentSyncStatus extends ProjectDocumentSyncPreview {
+  lastSyncedAt: string | null;
+  lastSyncedHash: string | null;
+  history: ProjectDocumentSyncHistoryEntry[];
+}
+
+/**
+ * One decision about one conflicting field.
+ *
+ * `database` keeps the project record and discards the document's value, `markdown`
+ * keeps PROJECT.md, `manual` writes `value`. A resolution for a field that is no
+ * longer in conflict is refused rather than applied.
+ */
+export interface ProjectDocumentConflictResolution {
+  field: string;
+  scope: 'project' | 'record';
+  entity?: string | null;
+  key?: string | null;
+  choice: 'database' | 'markdown' | 'manual';
+  value?: string | null;
+}
+
+/**
+ * What each synchronization state means, in the user's terms rather than the
+ * engine's. Every entry says what happened and what to do about it, because a
+ * label that only names the state leaves the user to guess the next step.
+ */
+export const PROJECT_DOCUMENT_SYNC_STATE_LABEL: Record<ProjectDocumentSyncStatusState, string> = {
+  synchronized: 'In sync with the project record',
+  markdown_changed: 'PROJECT.md has changes to apply',
+  database_changed: 'The project record changed - regenerate to catch up',
+  both_changed: 'Both sides changed to the same value',
+  conflict: 'Conflict - a field changed in both PROJECT.md and the project record',
+  error: 'PROJECT.md has problems that must be fixed first',
+  unavailable: 'No readable PROJECT.md to compare'
+};
+
 // ---------------------------------------------------------------------------
 // Phase 7: PROJECT.md change monitoring
 // ---------------------------------------------------------------------------
-
 /**
  * Why a monitored PROJECT.md is not synchronized with its project.
  *
@@ -286,6 +411,11 @@ export interface DocumentChangeNotification {
   recordUpdateCount: number;
   changedFieldNames: string[];
   changedEntityNames: string[];
+  /**
+   * Phase 7: the fields that changed on both sides and need an explicit decision.
+   * Names only - the values are on the synchronization status endpoint.
+   */
+  conflictFieldNames: string[];
   noRecordDifferences: boolean;
   warnings: DocumentMonitorIssue[];
   errors: DocumentMonitorIssue[];

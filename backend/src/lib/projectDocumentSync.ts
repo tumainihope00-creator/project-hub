@@ -17,6 +17,16 @@ import {
 import { prisma } from './prisma.js';
 import { loadProjectDocumentData, renderProjectDocument } from './projectDocument.js';
 import {
+  BASELINE_VERSION,
+  classifyField,
+  conflictFieldNames,
+  normalizeCell,
+  rollUpState,
+  type FieldVerdict,
+  type SyncBaseline,
+  type SyncState
+} from './projectDocumentBaseline.js';
+import {
   ParsedProjectDocument,
   ParsedRecord,
   splitCodeAndTitle,
@@ -125,7 +135,7 @@ export interface ChangeSet {
   unchanged: boolean;
   /** True when this is the first time this project has been synchronized. */
   firstSynchronization: boolean;
-  /** True when the database changed after the last sync. */
+  /** True when the database changed after the last sync. Coarse, Phase 6 semantics. */
   conflict: boolean;
   projectChanges: FieldChange[];
   childChanges: ChildChange[];
@@ -136,6 +146,26 @@ export interface ChangeSet {
   unknownSections: string[];
   /** Section content deliberately not synchronized, with the reason. */
   preservedDetailSections: { section: string; reason: string }[];
+  // ---- Phase 7: field-level, three-way ----
+  /**
+   * The classified synchronization state for this project.
+   *
+   * `projectChanges`/`childChanges` above are now only what may be *applied*: a
+   * field that both sides changed differently is in `conflicts` instead, and a field
+   * only the database moved is in `databaseChanges` and is never written. That
+   * split is the whole of Phase 7.
+   */
+  syncState: SyncState;
+  /** Every field that was compared, with its baseline/database/document values. */
+  verdicts: FieldVerdict[];
+  /** Fields both sides changed to different values. Withheld until resolved. */
+  conflicts: FieldVerdict[];
+  /** Fields only the database moved. Informational; never written. */
+  databaseChanges: FieldVerdict[];
+  /** True when a baseline existed, so the comparison was a real three-way one. */
+  baselineAvailable: boolean;
+  /** When that baseline was captured. */
+  baselineCapturedAt: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,15 +178,6 @@ function asText(value: unknown): string | null {
   return s;
 }
 
-/** Equality that ignores trailing whitespace only. Blank vs null is a real change. */
-function sameValue(a: unknown, b: unknown): boolean {
-  const na = asText(a);
-  const nb = asText(b);
-  const ta = na === null ? null : na.replace(/\s+$/, '');
-  const tb = nb === null ? null : nb.replace(/\s+$/, '');
-  return ta === tb;
-}
-
 function asDate(value: string | null | undefined): Date | null {
   if (!value) return null;
   const d = new Date(value);
@@ -167,7 +188,7 @@ function asDate(value: string | null | undefined): Date | null {
 // Entity specifications
 // ---------------------------------------------------------------------------
 
-interface ChildSpec {
+export interface ChildSpec {
   entity: EntityKey;
   /** Human name used in messages and the preview UI. */
   label: string;
@@ -208,14 +229,14 @@ function enumOr(
 }
 
 /** Strip the generator's `**CODE**` prefix and surrounding markdown emphasis. */
-function plainTitle(rec: ParsedRecord): string {
+export function plainTitle(rec: ParsedRecord): string {
   const { title } = splitCodeAndTitle(rec.title);
   return title.replace(/^[`*_]+|[`*_]+$/g, '').trim();
 }
 
 const PRIORITIES = Object.values(Priority) as string[];
 
-const SPECS: ChildSpec[] = [
+export const SPECS: ChildSpec[] = [
   {
     entity: 'research',
     label: 'Research entry',
@@ -480,7 +501,7 @@ const OUT_OF_SCOPE_SECTIONS: Record<string, string> = {
 // Core field mapping
 // ---------------------------------------------------------------------------
 
-const CORE_COLUMNS: { key: string; column: string }[] = [
+export const CORE_COLUMNS: { key: string; column: string }[] = [
   { key: 'description', column: 'description' },
   { key: 'problem', column: 'problem' },
   { key: 'motivation', column: 'motivation' },
@@ -488,7 +509,7 @@ const CORE_COLUMNS: { key: string; column: string }[] = [
   { key: 'expectedValue', column: 'expectedValue' }
 ];
 
-const PROSE_COLUMNS: { heading: string; column: string }[] = [
+export const PROSE_COLUMNS: { heading: string; column: string }[] = [
   { heading: 'V1 Scope', column: 'v1Scope' },
   { heading: 'Assumptions', column: 'assumptions' },
   { heading: 'Initial Questions', column: 'initialQuestions' },
@@ -531,12 +552,21 @@ export interface SyncProjectRow {
  * reported as changed when the document's value differs from the row's. An empty
  * string in the derived values means "the document said something we could not
  * use" (an unknown enum) and is skipped rather than written.
+ *
+ * Phase 7: every expressed column is also classified three ways (see
+ * projectDocumentBaseline.ts). Only a column the document alone changed becomes a
+ * write; a column both sides changed differently is recorded as a conflict and
+ * withheld; a column only the database moved is recorded as a database change and
+ * left alone. `verdicts` collects all three so the caller can explain the outcome
+ * without re-deriving anything.
  */
 function diffRecord(
   spec: ChildSpec,
   rec: ParsedRecord,
   row: any | null,
-  warnings: SyncIssue[]
+  warnings: SyncIssue[],
+  baselineFields: Record<string, string | null> | undefined,
+  verdicts: FieldVerdict[]
 ): ChildChange | null {
   const key = spec.key(rec);
   if (key === null) {
@@ -571,6 +601,21 @@ function diffRecord(
         changes.push({ field: spec.titleColumn, from: null, to: label });
       }
     }
+    // A record that does not exist yet has nothing in the database to protect, so
+    // every expressed column is a document-side change and the create is safe.
+    for (const change of changes) {
+      verdicts.push({
+        scope: 'record',
+        field: change.field,
+        entity: spec.entity,
+        key,
+        label,
+        state: 'markdown_changed',
+        baseline: normalizeCell(baselineFields?.[change.field] ?? null),
+        databaseValue: null,
+        markdownValue: normalizeCell(change.to)
+      });
+    }
     if (changes.length === 0) return null;
     return { entity: spec.entity, action: 'create', key, label, changes };
   }
@@ -583,6 +628,23 @@ function diffRecord(
       // A truncated title is display-only. Writing it would shorten a real title.
       if (isTruncated(String(value))) continue;
     }
+
+    const verdict = classifyField({
+      scope: 'record',
+      field,
+      entity: spec.entity,
+      key,
+      label,
+      baselineKnown: baselineFields !== undefined,
+      baseline: baselineFields?.[field] ?? null,
+      databaseValue: row[field],
+      markdownValue: value
+    });
+    verdicts.push(verdict);
+
+    // Only the document changed: this is the one case that may be written.
+    if (verdict.state !== 'markdown_changed') continue;
+
     if (field === 'date' || field === 'targetDate' || field === 'dueDate') {
       const current = row[field] ? new Date(row[field]).getTime() : null;
       const next = (value as Date).getTime();
@@ -591,9 +653,7 @@ function diffRecord(
       }
       continue;
     }
-    if (!sameValue(row[field], value)) {
-      changes.push({ field, from: asText(row[field]), to: asText(value) });
-    }
+    changes.push({ field, from: asText(row[field]), to: asText(value) });
   }
 
   if (changes.length === 0) return null;
@@ -605,15 +665,29 @@ function diffRecord(
  *
  * `content` must be the exact bytes read from disk; it is what gets hashed.
  * Nothing here writes to the database, so it is safe to call for a preview.
+ *
+ * `baseline` is the Phase 7 addition. Every field is compared three ways, and the
+ * returned `projectChanges`/`childChanges` are only the writes that are safe to
+ * make: a field the document alone changed. A field both sides changed
+ * differently comes back in `conflicts` and is withheld; a field only the database
+ * moved comes back in `databaseChanges` and is left alone. That split is the whole
+ * of this phase.
+ *
+ * Passing `null` is a real case, not a degraded one: a project that existed before
+ * this phase has no baseline. Differences are then reported as conflicts rather
+ * than applied, because with no record of the last agreement nobody can say which
+ * side is newer. See `classifyField`.
  */
 export function buildChangeSet(
   project: SyncProjectRow,
   parsed: ParsedProjectDocument,
   content: string,
-  data: Awaited<ReturnType<typeof loadProjectDocumentData>>
+  data: Awaited<ReturnType<typeof loadProjectDocumentData>>,
+  baseline: SyncBaseline | null = null
 ): ChangeSet {
   const warnings: SyncIssue[] = [];
   const errors: SyncIssue[] = [];
+  const verdicts: FieldVerdict[] = [];
 
   for (const w of parsed.warnings) warnings.push({ code: 'PARSE_WARNING', message: w });
   for (const e of parsed.errors) errors.push({ code: 'PARSE_ERROR', message: e });
@@ -642,26 +716,77 @@ export function buildChangeSet(
   // ---- project row ----
   const projectChanges: FieldChange[] = [];
   const dbProject = data.project as unknown as Record<string, unknown>;
-  for (const { key, column } of CORE_COLUMNS) {
-    if (!(key in parsed.coreFields)) continue;
-    const next = parsed.coreFields[key];
-    if (!sameValue(dbProject[column], next)) {
-      projectChanges.push({ field: column, from: asText(dbProject[column]), to: next });
+  /** False for a project that predates this phase and has no baseline yet. */
+  const baselineKnown = baseline !== null;
+
+  /** Classify one project column and record the verdict. Returns true if writable. */
+  const considerProjectField = (column: string, markdownValue: unknown): boolean => {
+    const verdict = classifyField({
+      scope: 'project',
+      field: column,
+      baselineKnown,
+      baseline: baseline?.project[column] ?? null,
+      databaseValue: dbProject[column],
+      markdownValue
+    });
+    verdicts.push(verdict);
+    if (verdict.state === 'markdown_changed') {
+      projectChanges.push({
+        field: column,
+        from: asText(dbProject[column]),
+        to: asText(markdownValue)
+      });
+      return true;
     }
+    return false;
+  };
+
+  for (const { key, column } of CORE_COLUMNS) {
+    if (!(key in parsed.coreFields)) {
+      // The document says nothing about this field. Still classified, so a database
+      // change nobody spoke for is visible rather than invisible - and it can never
+      // become a write, because an unexpressed field is not a request to clear it.
+      verdicts.push(
+        classifyField({
+          scope: 'project',
+          field: column,
+          baselineKnown,
+          baseline: baseline?.project[column] ?? null,
+          databaseValue: dbProject[column]
+        })
+      );
+      continue;
+    }
+    considerProjectField(column, parsed.coreFields[key]);
   }
   for (const { heading, column } of PROSE_COLUMNS) {
     const value = parsed.proseFields[heading];
-    if (value === undefined || value === '') continue;
-    if (!sameValue(dbProject[column], value)) {
-      projectChanges.push({ field: column, from: asText(dbProject[column]), to: value });
+    if (value === undefined || value === '') {
+      verdicts.push(
+        classifyField({
+          scope: 'project',
+          field: column,
+          baselineKnown,
+          baseline: baseline?.project[column] ?? null,
+          databaseValue: dbProject[column]
+        })
+      );
+      continue;
     }
+    considerProjectField(column, value);
   }
-  if (parsed.repositoryUrl != null && !sameValue(dbProject.repositoryUrl, parsed.repositoryUrl)) {
-    projectChanges.push({
-      field: 'repositoryUrl',
-      from: asText(dbProject.repositoryUrl as string),
-      to: parsed.repositoryUrl
-    });
+  if (parsed.repositoryUrl != null) {
+    considerProjectField('repositoryUrl', parsed.repositoryUrl);
+  } else {
+    verdicts.push(
+      classifyField({
+        scope: 'project',
+        field: 'repositoryUrl',
+        baselineKnown,
+        baseline: baseline?.project.repositoryUrl ?? null,
+        databaseValue: dbProject.repositoryUrl
+      })
+    );
   }
   for (const c of projectChanges) {
     if (PROTECTED_PROJECT_COLUMNS.has(c.field)) {
@@ -693,6 +818,7 @@ export function buildChangeSet(
       }
     }
 
+    const baselineForEntity = baseline?.records[spec.entity] ?? {};
     const matched = new Set<string>();
     for (const rec of records) {
       const key = spec.key(rec);
@@ -709,7 +835,7 @@ export function buildChangeSet(
         seenKeys.set(spec.entity, bucket);
       }
       const row = key !== null ? rowsByKey.get(key) ?? null : null;
-      const change = diffRecord(spec, rec, row, warnings);
+      const change = diffRecord(spec, rec, row, warnings, key !== null ? baselineForEntity[key] : undefined, verdicts);
       if (change) childChanges.push(change);
       if (key !== null) matched.add(key);
     }
@@ -722,6 +848,27 @@ export function buildChangeSet(
           key: k,
           label: spec.titleColumn ? String(row[spec.titleColumn] ?? k) : k
         });
+        // Phase 7: a record the document does not mention is still compared, so a
+        // record edited in the app since the last synchronization is reported as a
+        // database change. It is never written - the no-delete, no-overwrite rule
+        // is unchanged - and it is what tells the user to regenerate the file.
+        const baselineFields = baselineForEntity[k];
+        if (baselineFields) {
+          for (const field of Object.keys(baselineFields)) {
+            verdicts.push(
+              classifyField({
+                scope: 'record',
+                field,
+                entity: spec.entity,
+                key: k,
+                label: spec.titleColumn ? String(row[spec.titleColumn] ?? k) : k,
+                baselineKnown: true,
+                baseline: baselineFields[field] ?? null,
+                databaseValue: row[field]
+              })
+            );
+          }
+        }
       }
     }
   }
@@ -744,6 +891,25 @@ export function buildChangeSet(
     });
   }
 
+  const conflicts = verdicts.filter((v) => v.state === 'conflict');
+  const databaseChanges = verdicts.filter((v) => v.state === 'database_changed');
+  const syncState: SyncState = errors.length > 0 ? 'error' : rollUpState(verdicts);
+
+  if (conflicts.length > 0) {
+    warnings.push({
+      code: 'FIELD_CONFLICTS',
+      message: `${conflicts.length} field(s) were changed on both sides since the last synchronization and are being held back: ${conflicts
+        .map((c) => (c.scope === 'project' ? c.field : `${c.entity}:${c.key}.${c.field}`))
+        .join(', ')}. Resolve each one to finish synchronizing.`
+    });
+  }
+  if (databaseChanges.length > 0) {
+    warnings.push({
+      code: 'DATABASE_CHANGES_KEPT',
+      message: `${databaseChanges.length} field(s) changed in Project Hub since the last synchronization. Those database values are kept; regenerate PROJECT.md when you want the document to catch up.`
+    });
+  }
+
   return {
     projectId: project.id,
     projectName: project.name,
@@ -759,12 +925,18 @@ export function buildChangeSet(
     errors,
     unsupportedSections,
     unknownSections: parsed.unknownSections,
-    preservedDetailSections: PRESERVED_DETAIL
+    preservedDetailSections: PRESERVED_DETAIL,
+    syncState,
+    verdicts,
+    conflicts,
+    databaseChanges,
+    baselineAvailable: baseline != null,
+    baselineCapturedAt: baseline?.capturedAt ?? null
   };
 }
 
 /** Entity -> the section heading it is read from. */
-const SECTION_FOR_ENTITY: Record<EntityKey, string> = {
+export const SECTION_FOR_ENTITY: Record<EntityKey, string> = {
   research: 'Research',
   researchQuestions: 'Research Questions',
   requirements: 'Requirements',
@@ -780,6 +952,90 @@ const SECTION_FOR_ENTITY: Record<EntityKey, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// Baseline capture (Phase 7)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the synchronization baseline for a document.
+ *
+ * Derived from the parsed document through the same `CORE_COLUMNS`,
+ * `PROSE_COLUMNS` and `spec.values()` extraction the change-set builder uses, so
+ * the baseline can never describe a field the engine does not actually write.
+ * Fields the document did not express are simply absent, which is how "the
+ * document has no opinion about this" is represented - and why such a field can
+ * never be in conflict.
+ *
+ * This lives here rather than in projectDocumentBaseline.ts on purpose: it needs
+ * the field lists, and the baseline module is imported *by* this file, so putting
+ * it there would make the two modules import each other.
+ */
+export function buildBaseline(
+  parsed: ParsedProjectDocument,
+  documentHash: string,
+  now: Date = new Date()
+): SyncBaseline {
+  const project: Record<string, string | null> = {};
+
+  for (const { key, column } of CORE_COLUMNS) {
+    const value = parsed.coreFields[key];
+    if (value === undefined) continue;
+    project[column] = normalizeCell(value);
+  }
+  for (const { heading, column } of PROSE_COLUMNS) {
+    const value = parsed.proseFields[heading];
+    if (value === undefined) continue;
+    project[column] = normalizeCell(value);
+  }
+  if (parsed.repositoryUrl != null) {
+    project.repositoryUrl = normalizeCell(parsed.repositoryUrl);
+  }
+
+  const records: SyncBaseline['records'] = {};
+  for (const spec of SPECS) {
+    const sectionName = SECTION_FOR_ENTITY[spec.entity];
+    const parsedRecords = parsed.records[sectionName];
+    if (parsedRecords === undefined) continue;
+
+    const bucket: Record<string, Record<string, string | null>> = {};
+    for (const rec of parsedRecords) {
+      const key = spec.key(rec);
+      if (key === null) continue;
+      const fields: Record<string, string | null> = {};
+
+      // `values()` pushes its own warnings; they were already collected while
+      // building the change set from the same parse, so they are discarded here
+      // rather than reported twice.
+      const values = spec.values(rec, []);
+      for (const [field, value] of Object.entries(values)) {
+        // An empty string from `values()` is the sentinel for "the document said
+        // something unusable" (an unrecognised enum). It is never a value.
+        if (value === '' || value === null) continue;
+        fields[field] = normalizeCell(value);
+      }
+      // Mirror the change-set builder's title handling, so a name-keyed record's
+      // baseline carries the same identity the writes would use.
+      const titleColumn = spec.titleColumn;
+      if (titleColumn && fields[titleColumn] === undefined) {
+        const title = plainTitle(rec);
+        if (key === title || !isTruncated(title)) {
+          fields[titleColumn] = normalizeCell(title);
+        }
+      }
+      bucket[key] = fields;
+    }
+    if (Object.keys(bucket).length > 0) records[spec.entity] = bucket;
+  }
+
+  return {
+    version: BASELINE_VERSION,
+    capturedAt: now.toISOString(),
+    documentHash,
+    project,
+    records
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Applying a change set
 // ---------------------------------------------------------------------------
 
@@ -793,6 +1049,36 @@ export interface SyncResult {
   unmatchedDatabaseRecords: UnmatchedRecord[];
   warnings: SyncIssue[];
   syncedAt: string;
+  /** The classified state this run ended in. */
+  syncState: SyncState;
+  /** Field names still in conflict after the run. */
+  conflictFields: string[];
+}
+
+/**
+ * What a synchronization is recording about itself.
+ *
+ * Everything here is optional so a caller that knows nothing about Phase 7 still
+ * gets Phase 6 behaviour. The defaults are the conservative ones: no baseline is
+ * invented, and a run with nothing applied is not recorded as a synchronization.
+ */
+export interface ApplyOptions {
+  actor: string;
+  /** The baseline to store for the next comparison. Omit to leave it untouched. */
+  baseline?: SyncBaseline | null;
+  /** Which way data moved. Defaults to the document-into-database direction. */
+  direction?: 'MARKDOWN_TO_DATABASE' | 'DATABASE_TO_MARKDOWN' | 'CONFLICT_RESOLUTION';
+  /**
+   * Fields that were explicitly resolved by the user rather than derived. Recorded
+   * in the activity metadata so a later reader can tell a merge from a decision.
+   */
+  resolutions?: { target: string; choice: string }[];
+  /**
+   * False when nothing was applied. The document hash is still recorded - the bytes
+   * have been analyzed and are the known version - but "last synchronized" is not
+   * moved, because nothing was synchronized.
+   */
+  markSynced?: boolean;
 }
 
 /**
@@ -803,15 +1089,15 @@ export interface SyncResult {
  * the document landed. The activity row is written inside the same transaction, so
  * the log can never claim a synchronization that did not happen.
  *
- * The caller is responsible for having refused to build a change set with errors,
- * and for having forced `conflict` to be acknowledged. This function does not
- * second-guess that, but it does re-check ownership: the change set's project id
- * must match the row it is applied to.
+ * The caller is responsible for having refused a change set with errors, and for
+ * having decided what to do about conflicts. This function does not second-guess
+ * that, but it does re-check ownership: the change set's project id must match the
+ * row it is applied to.
  */
 export async function applyChangeSet(
   projectId: number,
   changeSet: ChangeSet,
-  options: { actor: string }
+  options: ApplyOptions
 ): Promise<SyncResult> {
   if (changeSet.projectId !== projectId) {
     throw new Error(
@@ -879,33 +1165,64 @@ export async function applyChangeSet(
 
     // 3. Record the resulting state. The state hash is recomputed after the
     //    writes so that a subsequent conflict check compares like with like.
+    //
+    //    Phase 7 bookkeeping goes in the same row and the same transaction: a
+    //    baseline that outlived a rolled-back apply would be worse than none, and
+    //    "conflicts: []" that disagrees with the conflicts actually reported would
+    //    be a lie the UI would repeat.
     const after = await loadProjectDocumentDataWithClient(tx, projectId);
     const resultingStateHash = hashContent(renderProjectDocument(after));
+    const syncedAt = new Date();
+    const stillConflicting = conflictFieldNames(changeSet.conflicts);
     await tx.project.update({
       where: { id: projectId },
       data: {
         projectDocumentHash: changeSet.documentHash,
         projectDocumentStateHash: resultingStateHash,
-        projectDocumentSyncedAt: new Date()
+        projectDocumentSyncState: options.markSynced === false ? changeSet.syncState : 'synchronized',
+        projectDocumentSyncDirection: options.direction ?? 'MARKDOWN_TO_DATABASE',
+        projectDocumentConflictFields: stillConflicting,
+        // Only written when the caller has one. A null baseline is left as it was:
+        // erasing it would lose the record of what the two sides last agreed on,
+        // which is the one thing that makes the next comparison meaningful.
+        ...(options.baseline
+          ? { projectDocumentBaseline: options.baseline as unknown as Prisma.InputJsonValue }
+          : {}),
+        ...(options.markSynced === false ? {} : { projectDocumentSyncedAt: syncedAt })
       }
     });
 
     // 4. One activity row describing the synchronization, inside the transaction.
+    //    This is the synchronization history: direction, what changed, what was
+    //    held back, and how anything held back was decided. No separate audit table
+    //    is needed, and none is wanted - one row per synchronization, in the
+    //    timeline the project already has.
     await tx.activityEvent.create({
       data: {
         projectId,
         type: 'PROJECT_UPDATED',
+        relatedType: 'ProjectDocumentSync',
         description:
           `Synchronized PROJECT.md into the project record: ${appliedProjectChanges.length} field(s), ` +
           `${appliedChildChanges.filter((c) => c.action === 'create').length} created, ` +
-          `${appliedChildChanges.filter((c) => c.action === 'update').length} updated.`,
+          `${appliedChildChanges.filter((c) => c.action === 'update').length} updated` +
+          (stillConflicting.length > 0
+            ? `, ${stillConflicting.length} field(s) held back as conflicting.`
+            : '.'),
         metadata: JSON.stringify({
           source: 'PROJECT.md',
+          direction: options.direction ?? 'MARKDOWN_TO_DATABASE',
           documentHash: changeSet.documentHash,
           resultingStateHash,
+          state: changeSet.syncState,
           projectFields: appliedProjectChanges.map((c) => c.field),
           created: appliedChildChanges.filter((c) => c.action === 'create').map((c) => `${c.entity}:${c.key}`),
           updated: appliedChildChanges.filter((c) => c.action === 'update').map((c) => `${c.entity}:${c.key}`),
+          databaseKept: changeSet.databaseChanges.map((c) =>
+            c.scope === 'project' ? c.field : `${c.entity}:${c.key}.${c.field}`
+          ),
+          conflicts: stillConflicting,
+          resolutions: options.resolutions ?? [],
           warnings: changeSet.warnings.length,
           actor: options.actor
         })
@@ -924,7 +1241,9 @@ export async function applyChangeSet(
     appliedChildChanges,
     unmatchedDatabaseRecords: changeSet.unmatchedDatabaseRecords,
     warnings: changeSet.warnings,
-    syncedAt: new Date().toISOString()
+    syncedAt: new Date().toISOString(),
+    syncState: options.markSynced === false ? changeSet.syncState : 'synchronized',
+    conflictFields: conflictFieldNames(changeSet.conflicts)
   };
 }
 

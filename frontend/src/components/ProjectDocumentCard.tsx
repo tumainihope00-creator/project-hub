@@ -5,15 +5,19 @@ import { useProject } from '../context/ProjectContext';
 import { Modal, Loading, ErrorBox } from '../components/ui';
 import { Markdown } from '../lib/markdown';
 import { useProjectMonitor } from '../lib/useDocumentMonitor';
-import { DOCUMENT_MONITOR_STATE_LABEL } from '../api/types';
+import { DOCUMENT_MONITOR_STATE_LABEL, PROJECT_DOCUMENT_SYNC_STATE_LABEL } from '../api/types';
 import type {
   DocumentChangeNotification,
   DocumentMonitorState,
+  ProjectDocumentConflict,
+  ProjectDocumentConflictResolution,
   ProjectDocumentContent,
   ProjectDocumentStatus,
+  ProjectDocumentSyncHistoryEntry,
   ProjectDocumentSyncState,
   ProjectDocumentSyncPreview,
-  ProjectDocumentSyncResult
+  ProjectDocumentSyncResult,
+  ProjectDocumentSyncStatus
 } from '../api/types';
 
 /**
@@ -236,10 +240,12 @@ export function ProjectDocumentCard() {
 }
 
 function describeSyncState(state: ProjectDocumentSyncState): string {
-  if (state.conflict) return 'Conflict — the project changed after the last sync';
-  if (state.neverSynchronized) return 'Not synchronized yet';
-  if (state.modified) return 'Modified since the last sync';
-  return 'In sync';
+  const label = PROJECT_DOCUMENT_SYNC_STATE_LABEL[state.state] ?? 'Checking…';
+  if (state.neverSynchronized && state.state !== 'conflict') return 'Not synchronized yet';
+  if (state.conflict && state.conflictFields.length > 0) {
+    return `${label}: ${state.conflictFields.join(', ')}`;
+  }
+  return label;
 }
 
 function stateColor(state: DocumentMonitorState): string {
@@ -337,11 +343,14 @@ function MonitorBanner({
 
 /**
  * The Phase 6 panel: Check, Preview and Synchronize.
- *
+/**
  * Check is read-only and cheap. Preview builds the change set and shows it without
- * writing anything. Synchronize applies that exact set behind a confirmation, and
- * a detected conflict has to be acknowledged explicitly rather than being resolved
- * automatically.
+ * writing anything. Synchronize applies that exact set behind a confirmation.
+ *
+ * Phase 7: when both sides changed the *same* field, nothing is applied until the
+ * user says which value to keep, per field. The three choices are Keep database,
+ * Keep PROJECT.md, and entering a value by hand; they are applied together, in one
+ * transaction, with the rest of the synchronization.
  */
 function ProjectDocumentSyncPanel({
   projectId,
@@ -357,6 +366,10 @@ function ProjectDocumentSyncPanel({
   const [preview, setPreview] = useState<ProjectDocumentSyncPreview | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [lastResult, setLastResult] = useState<ProjectDocumentSyncResult | null>(null);
+  const [choices, setChoices] = useState<Record<string, ProjectDocumentConflictResolution['choice']>>({});
+  const [manualValues, setManualValues] = useState<Record<string, string>>({});
+  const [history, setHistory] = useState<ProjectDocumentSyncHistoryEntry[] | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   async function run<T>(fn: () => Promise<T>): Promise<T | null> {
     setBusy(true);
@@ -372,13 +385,23 @@ function ProjectDocumentSyncPanel({
   }
 
   async function check() {
-    const result = await run(() => api.post<ProjectDocumentSyncPreview>(`/projects/${projectId}/project-document/sync/preview`, {}));
-    if (result) setPreview(result.data);
+    const result = await run(() =>
+      api.post<ProjectDocumentSyncPreview>(`/projects/${projectId}/project-document/sync/preview`, {})
+    );
+    if (result) {
+      setPreview(result.data);
+      // Start from the safest answer for every conflict: keep the record. Changing a
+      // default is one click; applying the wrong default is not something to undo by
+      // assumption.
+      setChoices(
+        Object.fromEntries(result.data.sync.conflicts.map((c) => [conflictKey(c), 'database' as const]))
+      );
+    }
   }
 
-  async function syncNow(acknowledgeConflict: boolean) {
+  async function syncNow() {
     const result = await run(() =>
-      api.post<ProjectDocumentSyncResult>(`/projects/${projectId}/project-document/sync`, { acknowledgeConflict })
+      api.post<ProjectDocumentSyncResult>(`/projects/${projectId}/project-document/sync`, {})
     );
     if (result) {
       setLastResult(result.data);
@@ -388,8 +411,59 @@ function ProjectDocumentSyncPanel({
     }
   }
 
+  async function resolveConflicts() {
+    const conflicts = preview?.sync.conflicts ?? [];
+    const resolutions: ProjectDocumentConflictResolution[] = conflicts.map((c) => {
+      const choice = choices[conflictKey(c)] ?? 'database';
+      return {
+        field: c.field,
+        scope: c.scope,
+        entity: c.entity,
+        key: c.key,
+        choice,
+        ...(choice === 'manual' ? { value: manualValues[conflictKey(c)] ?? '' } : {})
+      };
+    });
+    const result = await run(() =>
+      api.post<ProjectDocumentSyncResult>(`/projects/${projectId}/project-document/sync/resolve`, {
+        resolutions
+      })
+    );
+    if (result) {
+      setLastResult(result.data);
+      setPreview(result.data);
+      onDone();
+    }
+  }
+
   const canSync = preview !== null && preview.applicable && !preview.unchanged;
   const hasChanges = (preview?.projectChanges.length ?? 0) + (preview?.childChanges.length ?? 0);
+  const conflicts = preview?.sync.conflicts ?? [];
+  const allDecided = conflicts.length > 0 && conflicts.every((c) => choices[conflictKey(c)]);
+
+  /**
+   * Synchronization history, loaded only when asked for. It is not part of every
+   * page load because it costs a second query for something most people look at
+   * when they are specifically wondering what happened to their file.
+   */
+  async function loadHistory() {
+    if (history) {
+      setHistory(null);
+      return;
+    }
+    setBusy(true);
+    setHistoryError(null);
+    try {
+      const result = await api.get<ProjectDocumentSyncStatus>(
+        `/projects/${projectId}/project-document/sync/status`
+      );
+      setHistory(result.data.history);
+    } catch (err) {
+      setHistoryError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div style={{ marginTop: 16, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
@@ -409,7 +483,9 @@ function ProjectDocumentSyncPanel({
               ? lastResult.changed
                 ? `PROJECT.md synchronized — ${lastResult.updatedFields.length} field(s)/record(s) updated.`
                 : 'PROJECT.md synchronized — the document parsed cleanly and matched the project record.'
-              : 'Nothing was applied.'}
+              : lastResult.errors.length > 0
+                ? 'Nothing was applied.'
+                : 'The decisions were applied.'}
         </div>
       ) : null}
 
@@ -417,7 +493,12 @@ function ProjectDocumentSyncPanel({
         <button className="btn sm" onClick={check} disabled={busy}>
           {busy ? 'Checking…' : 'Check / Preview'}
         </button>
-        <button className="btn sm primary" onClick={() => setConfirming(true)} disabled={busy || !canSync}>
+        <button
+          className="btn sm primary"
+          onClick={() => setConfirming(true)}
+          disabled={busy || !canSync || conflicts.length > 0}
+          title={conflicts.length > 0 ? 'Decide the conflicting fields below first' : undefined}
+        >
           Synchronize…
         </button>
       </div>
@@ -433,8 +514,111 @@ function ProjectDocumentSyncPanel({
           Last synchronized {formatDateTime(state.lastSyncedAt)}.
         </div>
       ) : null}
+      {preview && !preview.sync.baseline.available ? (
+        <div className="tiny dim" style={{ marginTop: 4 }}>
+          No comparison baseline is recorded for this project yet, so differences are reported as conflicts rather than
+          applied. The first synchronization that finds the two in agreement records the baseline.
+        </div>
+      ) : null}
 
       {preview ? <SyncPreview preview={preview} total={hasChanges} /> : null}
+
+      {conflicts.length > 0 ? (
+        <div style={{ marginTop: 12 }}>
+          <div className="tiny" style={{ marginBottom: 6 }}>
+            {conflicts.length} field(s) changed in both PROJECT.md and the project record. Choose which value to keep.
+            Nothing is written until you apply.
+          </div>
+          {conflicts.map((c) => {
+            const k = conflictKey(c);
+            const choice = choices[k];
+            return (
+              <div key={k} style={{ border: '1px solid var(--line)', borderRadius: 6, padding: 8, marginBottom: 8 }}>
+                <div className="tiny">
+                  <span className="mono">{c.field}</span>
+                  {c.scope === 'record' ? (
+                    <span className="dim">
+                      {' '}
+                      · {c.entity} {c.label ?? c.key}
+                    </span>
+                  ) : null}
+                </div>
+                <ConflictValue label="Last agreed" value={c.baseline} />
+                <ConflictValue label="Project record" value={c.databaseValue} />
+                <ConflictValue label="PROJECT.md" value={c.markdownValue} />
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                  {(['database', 'markdown', 'manual'] as const).map((option) => (
+                    <button
+                      key={option}
+                      className={`btn sm${choice === option ? ' primary' : ''}`}
+                      disabled={busy}
+                      onClick={() => setChoices((prev) => ({ ...prev, [k]: option }))}
+                    >
+                      {option === 'database' ? 'Keep database' : option === 'markdown' ? 'Keep PROJECT.md' : 'Enter a value…'}
+                    </button>
+                  ))}
+                </div>
+                {choice === 'manual' ? (
+                  <input
+                    className="input"
+                    style={{ marginTop: 6, width: '100%' }}
+                    value={manualValues[k] ?? ''}
+                    placeholder="The value to store"
+                    onChange={(e) => setManualValues((prev) => ({ ...prev, [k]: e.target.value }))}
+                  />
+                ) : null}
+              </div>
+            );
+          })}
+          <button className="btn sm primary" onClick={resolveConflicts} disabled={busy || !allDecided}>
+            {busy ? 'Applying…' : `Apply ${conflicts.length} decision(s)`}
+          </button>
+          <div className="tiny dim" style={{ marginTop: 6 }}>
+            The file is not rewritten by this. When you keep the database value, PROJECT.md still contains your text —
+            regenerate the document when you want it to match the record again.
+          </div>
+        </div>
+      ) : null}
+
+      <div style={{ marginTop: 12 }}>
+        <button className="btn sm" onClick={loadHistory} disabled={busy}>
+          {history ? 'Hide history' : 'Synchronization history'}
+        </button>
+        {historyError ? <ErrorBox message={historyError} /> : null}
+        {history && history.length === 0 ? (
+          <div className="tiny dim" style={{ marginTop: 6 }}>
+            No synchronizations have been recorded for this project yet.
+          </div>
+        ) : null}
+        {history && history.length > 0 ? (
+          <ul className="tiny" style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+            {history.map((entry, i) => (
+              <li key={`${entry.at}-${i}`} style={{ marginTop: 4 }}>
+                <span className="dim">{entry.at ? formatDateTime(entry.at) : '—'} · </span>
+                {entry.direction === 'CONFLICT_RESOLUTION'
+                  ? 'Resolved conflicts'
+                  : entry.direction === 'DATABASE_TO_MARKDOWN'
+                    ? 'Document regenerated'
+                    : 'PROJECT.md applied'}
+                {entry.applied.length > 0 ? ` — ${entry.applied.join(', ')}` : ''}
+                {entry.conflicts.length > 0 ? (
+                  <span className="dim"> (held back: {entry.conflicts.join(', ')})</span>
+                ) : null}
+                {entry.databaseKept.length > 0 ? (
+                  <span className="dim"> (kept from the record: {entry.databaseKept.join(', ')})</span>
+                ) : null}
+                {entry.resolutions.length > 0 ? (
+                  <span className="dim">
+                    {' '}
+                    ({entry.resolutions.map((r) => `${r.target} = ${r.choice}`).join(', ')})
+                  </span>
+                ) : null}
+                {entry.actor ? <span className="dim"> · {entry.actor}</span> : null}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
 
       {confirming && preview ? (
         <Modal
@@ -445,27 +629,23 @@ function ProjectDocumentSyncPanel({
               <button className="btn" onClick={() => setConfirming(false)} disabled={busy}>
                 Cancel
               </button>
-              <button
-                className="btn danger"
-                onClick={() => syncNow(preview.conflict)}
-                disabled={busy}
-              >
-                {busy ? 'Synchronizing…' : preview.conflict ? 'Apply anyway' : 'Apply changes'}
+              <button className="btn danger" onClick={() => syncNow()} disabled={busy}>
+                {busy ? 'Synchronizing…' : 'Apply changes'}
               </button>
             </>
           }
         >
-          {preview.conflict ? (
-            <p style={{ marginTop: 0 }}>
-              <strong>The project record changed after this document was last synchronized.</strong> Applying now will
-              write the document over those newer values. Review the list below before continuing.
+          <p style={{ marginTop: 0 }}>
+            This writes the contents of <span className="mono">PROJECT.md</span> into the project record. Records that
+            are not in the document are <strong>not</strong> deleted.
+          </p>
+          {preview.sync.databaseChanged.length > 0 ? (
+            <p className="tiny dim">
+              {preview.sync.databaseChanged.length} field(s) changed in the project record since the last
+              synchronization and will be <strong>kept</strong>: {preview.sync.databaseChanged.join(', ')}. Regenerate
+              the document if you want it to catch up.
             </p>
-          ) : (
-            <p style={{ marginTop: 0 }}>
-              This writes the contents of <span className="mono">PROJECT.md</span> into the project record. Records that
-              are not in the document are <strong>not</strong> deleted.
-            </p>
-          )}
+          ) : null}
           <SyncPreview preview={preview} total={hasChanges} />
           {preview.warnings.length > 0 ? (
             <p className="tiny dim">
@@ -480,6 +660,19 @@ function ProjectDocumentSyncPanel({
   );
 }
 
+/** Stable identity for one conflicting field, across the choice state and the API. */
+function conflictKey(c: ProjectDocumentConflict): string {
+  return c.scope === 'project' ? c.field : `${c.entity}:${c.key}.${c.field}`;
+}
+
+function ConflictValue({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div className="tiny" style={{ marginTop: 4 }}>
+      <span className="dim">{label}: </span>
+      {value === null || value === '' ? <span className="dim">(empty)</span> : value}
+    </div>
+  );
+}
 function SyncPreview({ preview, total }: { preview: ProjectDocumentSyncPreview; total: number }) {
   if (preview.errors.length > 0) {
     return (
