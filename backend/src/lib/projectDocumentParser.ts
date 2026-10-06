@@ -95,7 +95,8 @@ const RECORD_SECTIONS = [
   'Milestones',
   'Tasks',
   'Issues',
-  'Notes'
+  'Notes',
+  'AI Prompts'
 ] as const;
 
 // Sections that exist in the document but are explicitly out of scope for Phase 6.

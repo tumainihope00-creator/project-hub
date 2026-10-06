@@ -230,6 +230,7 @@ describe('1-4. PROJECT.md is created with the project and describes the real rec
       'Tasks',
       'Issues',
       'Notes',
+      'AI Prompts',
       'Repository',
       'Deployment',
       'Development Sessions',
@@ -241,6 +242,7 @@ describe('1-4. PROJECT.md is created with the project and describes the real rec
     // inventing content.
     expect(content).toContain('## Requirements\n\n_No requirements documented yet._');
     expect(content).toContain('## Notes\n\n_No notes documented yet._');
+    expect(content).toContain('## AI Prompts\n\n_No AI prompts recorded yet._');
     expect(content).toContain('## Repository\n\n_Not yet documented._');
   });
 

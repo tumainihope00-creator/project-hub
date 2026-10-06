@@ -29,6 +29,9 @@ export const PROMPT_RESULTS = [
   'REJECTED',
   'NEEDS_MODIFICATION'
 ] as const;
+// Prompt lifecycle (Phase 8). Independent of PROMPT_RESULTS (what a run achieved)
+// and of STAGES (the project's lifecycle).
+export const PROMPT_STATUSES = ['DRAFT', 'READY', 'USED', 'ARCHIVED'] as const;
 export const DEPLOY_ENVS = ['LOCAL', 'DEVELOPMENT', 'STAGING', 'PRODUCTION'] as const;
 export const DEPLOY_STATUSES = ['QUEUED', 'IN_PROGRESS', 'SUCCESSFUL', 'FAILED', 'ROLLED_BACK'] as const;
 export const INCIDENT_STATUSES = ['OPEN', 'INVESTIGATING', 'RESOLVED', 'CLOSED', 'MONITORING'] as const;
@@ -199,6 +202,9 @@ const promptCreate = bindFields({
   issueId: optInt,
   result: enumZ(PROMPT_RESULTS).default('PARTIALLY_SUCCESSFUL'),
   resultNote: optText,
+  status: enumZ(PROMPT_STATUSES).default('DRAFT'),
+  // Not nullable: the column is NOT NULL, so `null` here would be a Prisma error.
+  isReusable: z.boolean().optional(),
   text: reqStr,
   response: optText
 });
@@ -464,7 +470,10 @@ export const RESOURCES: ResourceDef[] = [
     codePrefix: 'PROMPT',
     taggable: true,
     orderBy: { date: 'desc' },
-    searchFields: ['title', 'purpose', 'resultNote'],
+    // Phase 8: search spans identity, intent and the prompt text itself. `content`
+    // is the denormalized current text, which is what makes full-text prompt
+    // search one WHERE clause instead of a join over the version history.
+    searchFields: ['title', 'purpose', 'resultNote', 'category', 'content'],
     include: {
       versions: { orderBy: { version: 'asc' } },
       task: { select: { id: true, code: true, title: true } },

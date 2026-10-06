@@ -86,6 +86,7 @@ export interface ProjectDocumentData {
   tasks: any[];
   issues: any[];
   notes: any[];
+  prompts: any[];
   deployments: any[];
   gitReferences: any[];
   developmentSessions: any[];
@@ -110,6 +111,7 @@ const CHILD_ORDER = {
   tasks: { orderBy: { code: 'asc' as const } },
   issues: { orderBy: { code: 'asc' as const } },
   notes: { orderBy: [{ updatedAt: 'desc' as const }, { id: 'asc' as const }] },
+  prompts: { orderBy: { code: 'asc' as const } },
   deployments: { orderBy: [{ date: 'desc' as const }, { id: 'asc' as const }] },
   gitReferences: { orderBy: [{ date: 'desc' as const }, { id: 'asc' as const }] },
   developmentSessions: { orderBy: { number: 'asc' as const } }
@@ -224,6 +226,24 @@ function record(title: string, attributes: string[], detail?: string | null): st
     for (const line of text.split('\n')) lines.push(line ? `  ${line}` : '');
   }
   return lines.join('\n');
+}
+
+/**
+ * An attribute value is only rendered when it survives a round trip.
+ *
+ * The parser joins an attribute row on ` · ` and trims each part, so a value
+ * that is blank, padded, contains the separator, or spans lines would come
+ * back different from what was written. Omitting it means "not expressed",
+ * which the synchronization treats as "leave the stored value alone" - safe,
+ * unlike writing something that will not read back the same.
+ */
+function attributeSafe(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  const trimmed = text.trim();
+  if (!trimmed || trimmed !== text) return null;
+  if (trimmed.includes('·') || trimmed.includes('\n') || trimmed.includes('\r')) return null;
+  return trimmed;
 }
 
 function recordList(items: string[], emptyMessage: string): string {
@@ -466,6 +486,32 @@ export function renderProjectDocument(data: ProjectDocumentData): string {
       recordList(
         data.notes.map(n => record(oneLine(n.title) || 'Untitled note', [], n.content)),
         'No notes documented yet.'
+      )
+    )
+  );
+
+  out.push(
+    section(
+      'AI Prompts',
+      recordList(
+        data.prompts.map(pr => {
+          const category = attributeSafe(pr.category);
+          const purpose = attributeSafe(pr.purpose);
+          // The title is optional: a prompt may have none, and inventing one from
+          // the code would make the next synchronization write it back as real.
+          const title = oneLine(pr.title);
+          return record(
+            `**${oneLine(pr.code)}**${title ? ` ${title}` : ''}`,
+            [
+              category ? `Category: ${category}` : '',
+              `Status: ${label(pr.status)}`,
+              `Reusable: ${pr.isReusable ? 'Yes' : 'No'}`,
+              purpose ? `Purpose: ${purpose}` : ''
+            ].filter(Boolean),
+            pr.content
+          );
+        }),
+        'No AI prompts recorded yet.'
       )
     )
   );

@@ -90,13 +90,21 @@ router.get('/search', async (req, res, next) => {
     if (!q) return res.json({ data: {} });
     const contains = { contains: q, mode: 'insensitive' as const };
     const limit = 25;
+    // Phase 8: prompt search spans title, purpose, category, current content and
+    // tags. Tags live in their own table, so they need a lookup before the OR.
+    const taggedPromptIds = (
+      await prisma.tagAssignment.findMany({
+        where: { taggableType: 'prompt', tag: { name: contains } },
+        select: { taggableId: true }
+      })
+    ).map(r => r.taggableId);
 
     const [projects, tasks, issues, research, prompts, documents, decisions, devSessions, notes, requirements, features, deployments] = await Promise.all([
       prisma.project.findMany({ where: { OR: [{ name: contains }, { description: contains }, { problem: contains }, { motivation: contains }], isArchived: false }, take: limit, select: { id: true, slug: true, name: true, stage: true, isArchived: true, description: true, updatedAt: true } }),
       prisma.task.findMany({ where: { OR: [{ title: contains }, { description: contains }, { code: contains }] }, take: limit, include: { project: { select: { id: true, name: true, slug: true } } } }),
       prisma.issue.findMany({ where: { OR: [{ title: contains }, { description: contains }, { code: contains }] }, take: limit, include: { project: { select: { id: true, name: true, slug: true } } } }),
       prisma.researchEntry.findMany({ where: { OR: [{ title: contains }, { summary: contains }, { findings: contains }] }, take: limit, include: { project: { select: { id: true, name: true, slug: true } } } }),
-      prisma.prompt.findMany({ where: { OR: [{ title: contains }, { purpose: contains }, { resultNote: contains }, { versions: { some: { text: { contains: q, mode: 'insensitive' } } } }] }, take: limit, include: { project: { select: { id: true, name: true, slug: true } } } }),
+      prisma.prompt.findMany({ where: { OR: [{ title: contains }, { purpose: contains }, { category: contains }, { resultNote: contains }, { content: contains }, { code: contains }, { id: { in: taggedPromptIds } }, { versions: { some: { text: { contains: q, mode: 'insensitive' } } } }] }, take: limit, include: { project: { select: { id: true, name: true, slug: true } } } }),
       prisma.projectDocument.findMany({ where: { OR: [{ title: contains }, { versions: { some: { content: { contains: q, mode: 'insensitive' } } } }] }, take: limit, include: { project: { select: { id: true, name: true, slug: true } } } }),
       prisma.architectureDecision.findMany({ where: { OR: [{ title: contains }, { decision: contains }, { context: contains }] }, take: limit, include: { project: { select: { id: true, name: true, slug: true } } } }),
       prisma.developmentSession.findMany({ where: { OR: [{ goal: contains }, { workedOn: contains }, { learned: contains }] }, take: limit, include: { project: { select: { id: true, name: true, slug: true } } } }),

@@ -6,7 +6,8 @@ export type FieldType =
   | 'number'
   | 'url'
   | 'tags'
-  | 'relation';
+  | 'relation'
+  | 'boolean';
 
 export interface FieldDef {
   name: string;
@@ -60,7 +61,24 @@ export const INCIDENT_STATUSES = ['OPEN', 'INVESTIGATING', 'RESOLVED', 'CLOSED',
 export const DOC_TYPES = ['README', 'SRS', 'API_DOCUMENTATION', 'USER_GUIDE', 'INSTALLATION_GUIDE', 'ARCHITECTURE_DOCUMENTATION', 'DEPLOYMENT_GUIDE', 'RESEARCH_REPORT', 'OTHER'];
 export const GIT_KINDS = ['REPOSITORY', 'COMMIT', 'BRANCH', 'PULL_REQUEST', 'RELEASE'];
 export const TECH_CATEGORIES = ['FRONTEND', 'BACKEND', 'DATABASE', 'HOSTING', 'OTHER'];
-export const PROMPT_CATEGORIES = ['Planning', 'Architecture', 'Coding', 'Debugging', 'Refactoring', 'Testing', 'Database', 'Deployment', 'Research', 'Documentation', 'Security', 'V1 Build Prompt'];
+export const PROMPT_CATEGORIES = [
+  'Research',
+  'Planning',
+  'Architecture',
+  'Coding',
+  'Debugging',
+  'Refactoring',
+  'Database',
+  'UI/UX',
+  'Testing',
+  'Deployment',
+  'Documentation',
+  'Security',
+  'Troubleshooting',
+  'General',
+  'V1 Build Prompt'
+];
+export const PROMPT_STATUSES = ['DRAFT', 'READY', 'USED', 'ARCHIVED'];
 
 export const RESOURCES: Record<string, ResourceConfig> = {
   research: {
@@ -298,6 +316,8 @@ export const RESOURCES: Record<string, ResourceConfig> = {
     fields: [
       { name: 'code', label: 'Code', type: 'text', placeholder: 'auto (PROMPT-001)' },
       { name: 'title', label: 'Title', type: 'text' },
+      { name: 'status', label: 'Status', type: 'select', options: PROMPT_STATUSES },
+      { name: 'isReusable', label: 'Reusable template', type: 'boolean', options: ['true', 'false'] },
       { name: 'category', label: 'Category', type: 'select', options: PROMPT_CATEGORIES },
       { name: 'stage', label: 'Stage', type: 'select', options: STAGES },
       { name: 'tool', label: 'AI tool', type: 'text' },
@@ -316,14 +336,18 @@ export const RESOURCES: Record<string, ResourceConfig> = {
     columns: [
       { key: 'code', label: 'Code', kind: 'mono', width: '110px' },
       { key: 'title', label: 'Prompt' },
+      { key: 'status', label: 'Status', kind: 'badge', width: '105px' },
       { key: 'category', label: 'Category', width: '120px' },
+      { key: 'isReusable', label: 'Template', kind: 'bool', width: '85px' },
       { key: 'tool', label: 'Tool', width: '120px' },
       { key: 'result', label: 'Result', kind: 'badge', width: '150px' },
       { key: 'date', label: 'Date', kind: 'date', width: '105px' }
     ],
     filters: [
+      { name: 'status', label: 'Status', type: 'select', options: PROMPT_STATUSES },
       { name: 'result', label: 'Result', type: 'select', options: PROMPT_RESULTS },
-      { name: 'category', label: 'Category', type: 'select', options: PROMPT_CATEGORIES }
+      { name: 'category', label: 'Category', type: 'select', options: PROMPT_CATEGORIES },
+      { name: 'isReusable', label: 'Reusable', type: 'select', options: ['true', 'false'] }
     ]
   },
   documents: {

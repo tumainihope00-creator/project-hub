@@ -2810,3 +2810,265 @@ Recommended order, each step independently verifiable:
 6. **Workspace portability follow-ups**: the known limitations (folder moved or
    deleted, symlinked root, unauthenticated API) are unchanged by this phase and
    still open.
+
+---
+
+# PHASE 8 IMPLEMENTATION REPORT - AI PROMPT MANAGEMENT & PROJECT CONTEXT SYSTEM
+
+Scope as specified: structured prompt storage/organization/search/versioning per
+project, a PROJECT.md representation via the Phase 6/7 synchronization
+infrastructure, a reusable project context builder, and a prompt generator with
+missing-information detection. **No AI provider integration of any kind** — no
+API keys, no outbound model calls, prompts are data and are never executed.
+
+## 1. FILES CHANGED
+
+10 modified, 4 new, 1 new migration directory, 2 documentation files.
+
+| File | Change |
+| ---- | ------ |
+| `backend/prisma/schema.prisma` | `PromptStatus` enum; `status`, `isReusable`, `content` on `Prompt` |
+| `backend/prisma/migrations/20261006090000_phase8_ai_prompt_management/migration.sql` | new — additive DDL + backfills (section 2) |
+| `backend/src/lib/promptLibrary.ts` | new — category list, `appendPromptVersion`, `writePromptContent` (the invariant helpers) |
+| `backend/src/lib/promptContext.ts` | new — `buildPromptContext`, `buildPromptReadiness`, `buildPromptDraft` |
+| `backend/src/routes/prompts.ts` | new — `POST .../prompts/generate`, `/:id/copy`, `/:id/archive`; global `GET /api/prompts[/:id]` |
+| `backend/src/app.ts` | mounts both routers before the generic resource loop |
+| `backend/src/resources.ts` | `PROMPT_STATUSES`, `promptCreate` gains `status`/`isReusable`, search fields extended |
+| `backend/src/routes/generic.ts` | content/version invariant on prompts, `isReusable` boolean filter coercion, default ARCHIVED exclusion |
+| `backend/src/routes/misc.ts` | `GET /api/search` prompt branch extended (title/purpose/category/content/code/tags) |
+| `backend/src/lib/projectDocument.ts` | `## AI Prompts` rendering + `attributeSafe()` |
+| `backend/src/lib/projectDocumentParser.ts` | `AI Prompts` added to `RECORD_SECTIONS` |
+| `backend/src/lib/projectDocumentSync.ts` | prompts sync spec, `EntityKey`/identity/section maps, `booleans`, `coerceValue`, `afterApply` |
+| `backend/tests/promptPhase8.test.ts` | new — 16 tests, the 15 specified scenarios (section 10) |
+| `backend/tests/projectDocument.test.ts` | heading list + empty-section assertions updated for `AI Prompts` |
+| `frontend/src/resources.ts` | `boolean` field type, `PROMPT_STATUSES`, categories aligned with backend, status/reusable fields, columns and filters |
+| `frontend/src/components/ResourceForm.tsx` | renders and coerces `boolean` fields (Yes/No select ↔ real boolean) |
+| `frontend/src/pages/PromptsPage.tsx` | status/reusable display + filters, Copy/Archive actions, `GeneratePromptModal` |
+| `README.md` | new "AI prompt library & project context" section, API rows, test + status updates |
+| `report.md` | this report |
+
+## 2. MIGRATIONS
+
+One migration, applied to the live database, strictly additive:
+
+- `CREATE TYPE "PromptStatus" AS ENUM ('DRAFT','READY','USED','ARCHIVED')`.
+- Three columns on `prompts`: `status` (NOT NULL, default `DRAFT`), `isReusable`
+  (NOT NULL, default `false`), `content` (NOT NULL, default `''`).
+- Backfill **of the new columns only**: `status = 'USED'` (existing prompts were
+  recorded after AI use) and `content` copied from `finalVersionId` — else the
+  newest `PromptVersion.text` — so existing text becomes searchable without
+  altering a single version row.
+- One index: `prompts_projectId_status_idx`.
+
+Nothing is dropped, renamed, altered or recreated. No project, task, note or
+existing prompt value is modified. Fingerprint before migration, after
+migration, before the suite and after the suite: identical
+(`99779821506b688ca08722e53f6876c38fb4431a0013d6f86d729176123fc797`).
+
+## 3. PROMPT DATA MODEL
+
+- `Prompt`: `code` (unique per project, `PROMPT-###`), optional `title`,
+  `purpose`, `category`, `status`, `isReusable`, `content` (NOT NULL), plus the
+  pre-existing fields (tool, model, result, task/feature/issue links, tags).
+- `PromptVersion` stays the append-only history; `prompts.content` is the
+  denormalized current text. **Invariant: `content` equals the newest version's
+  `text` after every write.** Enforced centrally in `lib/promptLibrary.ts`:
+  `appendPromptVersion` (creates the version row) and `writePromptContent`
+  (updates content + appends the version when the text changed, in one
+  transaction).
+- Status lifecycle `DRAFT → READY → USED → ARCHIVED`. `ARCHIVED` replaces
+  deletion: archive is a status change, idempotent, and archived prompts leave
+  the default lists but are readable via an explicit `?status=ARCHIVED`.
+- `isReusable` marks template prompts; only reusable, non-archived prompts
+  appear in generated drafts ("Reusable prompts in this project").
+- Every content write (create, new version, PROJECT.md edit, conflict
+  resolution) is routed through the invariant helpers inside a transaction —
+  including routes that did not exist before this phase.
+
+## 4. API CHANGES
+
+New named routes (mounted before the generic loop so they are never read as
+prompt ids):
+
+| Method | Route | Behavior |
+| ------ | ----- | -------- |
+| POST | `/api/projects/:id/prompts/generate` | `{purpose}` → `{data:{readiness,draft}, meta:{failures}}`. Always 200; only an unknown purpose is 400 (`purpose must be one of: …`). |
+| POST | `/api/projects/:id/prompts/:pid/copy` | Fresh code, fresh history (v1 records the source), `status: 'DRAFT'`; record links kept only when the copy stays in the project; optional `targetProjectId`. |
+| POST | `/api/projects/:id/prompts/:pid/archive` | Status → `ARCHIVED` (idempotent), activity logged, row kept. |
+| GET | `/api/prompts` | Cross-project search: `q`, `projectId`, `reusable=true\|false`, `status` (validated; default excludes ARCHIVED), `limit` → `{data, meta:{total,limit}}`. |
+| GET | `/api/prompts/:id` | One prompt anywhere with project, version history and tags. |
+
+Generic resource router (`/projects/:id/prompts`):
+
+- Create/update validate the content invariant transactionally (`text` on
+  create; a content change on update appends a version; metadata-only updates
+  append none).
+- Filters: any query key is an equality filter; `isReusable=true|false` is
+  coerced to a real boolean; unknown keys are ignored by Prisma's `where` shape
+  the same way as before.
+- Default list excludes `ARCHIVED`; an explicit `?status=` (any value,
+  including `ARCHIVED`) overrides that.
+- `q` searches `title, purpose, category, content, code, tags`.
+- `GET /api/search` prompt branch extended with `content` and `code`.
+
+## 5. UI CHANGES
+
+Prompts tab (`frontend/src/pages/PromptsPage.tsx`):
+
+- **Generate Prompt** (primary action) opens an offline generator modal: purpose
+  select (remembered in `sessionStorage` under `phub.promptPurpose`), a live
+  readiness checklist (✓/✗ per required and recommended item), an editable draft
+  textarea, source-failure warnings, and three actions — **Fill missing** (toggles
+  links to the project pages where each absent item can be recorded),
+  **Proceed anyway** / **Save prompt** (saves the draft as a normal `DRAFT`
+  prompt, v1), and **Cancel**. The modal states plainly that no AI service is
+  called.
+- Status badge column and Reusable (Yes/No) column; status and reusable filters
+  next to search (archived prompts reachable via `?status=ARCHIVED`), alongside
+  the existing result/category filters.
+- Detail modal shows Status (+ "reusable template" marker), **Copy** (toast with
+  the new code) and **Archive** (confirm step; archived prompts show a restore
+  hint instead — restore is the status field in Edit metadata).
+- Create/edit forms gained a Status select and a Reusable (Yes/No) boolean
+  field; prompt text remains editable through the existing version flow, which
+  now keeps `content` in step automatically.
+
+Supporting: `frontend/src/resources.ts` (new `boolean` field type, `PROMPT_STATUSES`,
+categories aligned to the backend list) and `ResourceForm.tsx` (boolean rendering
+and Yes/No ↔ boolean coercion).
+
+## 6. PROJECT.md CHANGES
+
+- New list section `## AI Prompts`, rendered after `## Notes`: bold code,
+  optional title (omitted entirely when absent — an untitled prompt shows the
+  bare code, never a fabricated title), attributes
+  `Category · Status · Reusable · Purpose` (only values that are present and
+  safe to inline — `attributeSafe()` drops empty, padded or newline-containing
+  values), content as the detail block, `_No AI prompts recorded yet._` when empty.
+- Parser: `AI Prompts` registered in `RECORD_SECTIONS`; unknown sections remain
+  ignored as before.
+- Sync: prompts are full record-scope citizens keyed by `code`
+  (`prompts:PROMPT-0042.content` style conflict targets), with `isReusable`
+  declared as a boolean column so `Yes/No` in the file maps back to a real
+  boolean. An applied content change (create or update) runs an `afterApply`
+  hook that appends a prompt version noting PROJECT.md as the source, so the
+  version invariant holds through sync exactly as it does through the API.
+- Regenerate/preview/sync/status/resolve endpoints are unchanged; prompts simply
+  participate in them.
+
+## 7. CONTEXT-BUILDER BEHAVIOR
+
+`buildPromptContext(projectId)` in `backend/src/lib/promptContext.ts`:
+
+- Reuses `lib/generator/collect.ts` (the V1 generator's collector) for the
+  shared sections, then adds issues, milestones, deployments and the project's
+  reusable prompts — one resilient read layer for both generators. A failed
+  source degrades to an empty list plus a recorded failure; only a missing
+  project (404) is an error.
+- Returns the records plus `presence: Record<ContextKey, boolean>` for twelve
+  sections (description, problem, requirements, features, tasks, issues,
+  decisions, techStack, milestones, deployments, notes, research). Presence is a
+  pure fact about the data — no scoring, no guessing.
+- No data leaves the process; nothing is stored by the builder.
+
+## 8. PROMPT-GENERATOR BEHAVIOR
+
+`POST .../prompts/generate {purpose}` with eight purposes (Research,
+Architecture, Feature implementation, Debugging, Refactoring, Testing,
+Documentation, Deployment):
+
+- `buildPromptReadiness(context, purpose)` — purpose-specific required and
+  recommended items; only required gaps make `ready` false; returns every item
+  with its label and verdict, plus `missingRequired` / `missingRecommended`.
+- `buildPromptDraft(context, purpose)` — instruction line for the purpose, then
+  every section copied from the records or explicitly marked
+  `Not provided in Project Hub.` There is no code path that fills a gap with
+  plausible text. Long values are clipped with a visible `[truncated]` marker.
+  The draft is returned, not saved; saving is an ordinary prompt create.
+- Response is always 200 with the checklist alongside the draft, so the UI can
+  show "what is missing" next to exactly what "Proceed anyway" would save;
+  `meta.failures` carries any degraded source.
+
+## 9. SYNC / CONFLICT BEHAVIOR
+
+- Prompts participate in preview, sync, conflict detection, resolution and
+  history like every other record: markdown-only edits apply, database-only
+  changes are kept, both-sides-different is held back until resolved, and an
+  applied edit appends a version in the same transaction.
+- **Two defects found and fixed while testing this path:** (a) the Phase 7
+  resolve path bypassed the change-set builder, so `isReusable` arrived from the
+  file as a string against a boolean column — fixed with `coerceValue()` applied
+  inside `applyChangeSet` for both creates and updates; (b) the version
+  invariant did not run for sync-applied changes — fixed by routing both the
+  create and update branches through an `afterApply` hook. Test 14 locks both
+  down (conflict held → resolve markdown → exactly 3 versions, invariant holds).
+- Record-scope resolve input shape: `{scope:'record', entity, key, field,
+  choice:'markdown'|'database'|'manual', value?}`; conflict target names use
+  `entity:key.field` (e.g. `prompts:PROMPT-0042.content`).
+- All safety rules unchanged: no deletes, no clears, single transaction, re-read
+  before write, one sync at a time, no automatic rewrite after a `database`
+  decision.
+
+## 10. TESTS PERFORMED
+
+- `backend/tests/promptPhase8.test.ts` — **16 tests, all passing**, covering the
+  15 specified scenarios: (1) create + defaults, (2) edit version immutability /
+  metadata-only adds none, (3) scoped + global search incl. content and
+  `/api/search`, (4) category filter, (5) reusable filter + presence in draft
+  context, (6) archive semantics (status, excluded by default, explicit
+  `?status=ARCHIVED`, idempotent, no deletion), (7) PROJECT.md render → preview →
+  round-trip (untitled prompt invents no title) and a hand-edit applying back
+  with a PROJECT.md-sourced version, (8) generate (exact draft title,
+  requirement line, "no AI service was called", bad purpose → 400), (9) missing
+  information reported honestly (`Not provided in Project Hub.`, no fabricated
+  field labels), (10) proceed anyway saves an unready draft as DRAFT, (11) fill
+  the gap → checklist turns ready, (12) related task kept through reads and a
+  same-project copy, (13) cross-project copy (fresh code, no dangling links,
+  404 on a bad target), (14) sync conflict held, resolved, invariant preserved,
+  (15) database fingerprint unchanged.
+- Full backend suite: **327/327 tests, 11 files**, exit 0.
+- Backend typecheck clean; frontend `tsc -b && vite build` clean.
+- Fingerprint identical at every checkpoint (before/after migration, before/after
+  the suite): `997798…`, `testRows 0`, counts unchanged
+  (`projects 8, tasks 18, notes 9, prompts 3, prompt_versions 4`).
+
+## 11. PROBLEMS DISCOVERED
+
+1. **Resolve-path type coercion and invariant gap** (section 9) — found by
+   writing the conflict test before trusting the feature; both fixed and now
+   regression-tested.
+2. **Untitled prompts would have been misrepresented in PROJECT.md** — a naive
+   renderer would have padded an empty title into the attribute line; fixed with
+   `attributeSafe()` and title omission, asserted by test 7.
+3. **Code-padding inconsistency** — ordinary creation pads 3 digits
+   (`PROMPT-001`, from `nextCode`), the copy route pads 4 (`PROMPT-0001`).
+   Cosmetic, not data-affecting; tests accept `PROMPT-\d{3,}`. Worth unifying in
+   a later phase.
+4. **Fingerprint script reports `-1`** for `project_document_versions` and
+   `incidents` — a pre-existing table-name mismatch in the counting script, not
+   a database problem; identical before and after this phase.
+5. **Archived-by-default vs. archived visibility** — the default list exclusion
+   needed an explicit-status escape hatch so archives stay reachable; shipped as
+   `?status=ARCHIVED` rather than an `includeArchived` flag on the generic route.
+
+## 12. PHASE 9 PLAN (PROPOSED — PENDING THE USER'S PHASE 9 SPECIFICATION)
+
+In recommended order, each independently verifiable:
+
+1. **Global prompt library page** — a cross-project browse/copy UI over the
+   existing `GET /api/prompts` + `GET /api/prompts/:id`, with a project picker
+   for `targetProjectId` on copy.
+2. **Lifecycle automation** — mark `USED` when a prompt's first AI response /
+   result is recorded, a one-click `READY` review action, and an explicit
+   Restore from archive (status change only, still no deletions).
+3. **One generator, not two** — point the V1 Prompt Generator tab at
+   `buildPromptContext`/`buildPromptDraft` so both surfaces share a single
+   collector and a single no-fabrication guarantee.
+4. **Sync follow-ups from the Phase 7 plan that touch prompts** — record
+   identity (code + title) in the conflict card, and baseline adoption for the
+   eight existing projects.
+5. **Prompt export** — a read-only JSON/Markdown export of a project's prompt
+   library (the API already carries every field needed).
+
+Safety posture for Phase 9 is unchanged: additive migrations only, no destructive
+DB operations, fingerprint before/after, tests against `__TEST__` fixtures only.

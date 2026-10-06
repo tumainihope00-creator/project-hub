@@ -130,6 +130,16 @@ enum PromptResult {
   GENERATED // Produced by the V1 Prompt Generator; not yet evaluated against an AI run
 }
 
+// Prompt lifecycle (Phase 8). Deliberately separate from PromptResult (what an AI
+// run achieved) and from LifecycleStage (the project's stage). REUSABLE is not a
+// status: reusability is a flag, so a prompt can be reusable in any state.
+enum PromptStatus {
+  DRAFT
+  READY
+  USED
+  ARCHIVED
+}
+
 enum DeploymentEnvironment {
   LOCAL
   DEVELOPMENT
@@ -724,6 +734,13 @@ model Prompt {
   result      PromptResult  @default(PARTIALLY_SUCCESSFUL)
   resultNote  String?       // Why it failed / what fixed it
   finalVersionId Int?       // Version that produced the final implementation
+  status      PromptStatus  @default(DRAFT) // Phase 8 lifecycle; independent of result
+  isReusable  Boolean       @default(false) // Phase 8: usable as a template elsewhere
+  // Phase 8: the current prompt text, denormalized from the latest version so it
+  // can be searched, indexed and synchronized without joining history. Every
+  // write path keeps it equal to the newest PromptVersion.text (see
+  // lib/promptLibrary.ts); the versions table remains the history.
+  content     String        @default("")
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
@@ -732,6 +749,7 @@ model Prompt {
 
   @@unique([projectId, code])
   @@index([projectId])
+  @@index([projectId, status])
   @@index([category])
   @@index([result])
   @@index([date])

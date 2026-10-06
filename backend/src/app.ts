@@ -12,6 +12,7 @@ import { generatorRouter } from './routes/generator.js';
 import { importRouter } from './routes/import.js';
 import settingsRouter from './routes/settings.js';
 import documentMonitorRouter from './routes/documentMonitor.js';
+import { globalPromptsRouter, projectPromptsRouter } from './routes/prompts.js';
 
 export function createApp() {
   const app = express();
@@ -59,6 +60,13 @@ export function createApp() {
 
   // V1 Prompt Generator (project-scoped)
   app.use('/api/projects/:projectId/generator', generatorRouter());
+
+  // Phase 8: prompt generation, copy and archive. Mounted before the generic
+  // resource routes below so `prompts/generate` and `prompts/:id/copy` are read
+  // as named paths rather than as prompt ids. The global prompt search sits
+  // outside any project scope.
+  app.use('/api/projects/:projectId/prompts', projectPromptsRouter());
+  app.use('/api/prompts', globalPromptsRouter());
 
   // Generic project-scoped resource routes
   for (const def of RESOURCES) {

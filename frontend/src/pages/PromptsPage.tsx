@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, formatDate, formatDateTime, qs } from '../api/client';
 import { useApi, useDebounced } from '../lib/useApi';
 import { useProject } from '../context/ProjectContext';
@@ -22,6 +23,9 @@ interface PromptVersion {
 
 interface PromptRow extends ResourceRow {
   code: string;
+  status: string;
+  isReusable: boolean;
+  content?: string;
   title?: string | null;
   purpose?: string | null;
   category?: string | null;
@@ -46,6 +50,7 @@ export function PromptsPage() {
   const debounced = useDebounced(search, 300);
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [creating, setCreating] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [editing, setEditing] = useState<PromptRow | null>(null);
   const [viewing, setViewing] = useState<PromptRow | null>(null);
   const [addingVersion, setAddingVersion] = useState(false);
@@ -88,6 +93,19 @@ export function PromptsPage() {
     after();
   };
 
+  const copyPrompt = async (row: PromptRow) => {
+    const res = await api.post<PromptRow>(`/projects/${project.id}/prompts/${row.id}/copy`);
+    toast(`Copied as ${res.data.code}`);
+    after();
+  };
+
+  const archivePrompt = async (id: number) => {
+    await api.post(`/projects/${project.id}/prompts/${id}/archive`);
+    toast('Prompt archived — nothing was deleted');
+    setViewing(null);
+    after();
+  };
+
   const versions = viewing?.versions ?? [];
   const latest = versions.length ? versions[versions.length - 1] : null;
 
@@ -99,7 +117,10 @@ export function PromptsPage() {
           <div className="sub">{rows.length} recorded prompts — including prompts that failed.</div>
         </div>
         <div className="actions">
-          <button className="btn primary" onClick={() => setCreating(true)}>
+          <button className="btn primary" onClick={() => setGenerating(true)}>
+            Generate Prompt
+          </button>
+          <button className="btn" onClick={() => setCreating(true)}>
             + New Prompt
           </button>
         </div>
@@ -112,7 +133,7 @@ export function PromptsPage() {
             <option value="">All {f.label.toLowerCase()}</option>
             {(f.options ?? []).map(o => (
               <option key={o} value={o}>
-                {humanize(o)}
+                {f.name === 'isReusable' ? (o === 'true' ? 'Yes' : 'No') : humanize(o)}
               </option>
             ))}
           </select>
@@ -152,6 +173,10 @@ export function PromptsPage() {
         )}
       </div>
 
+      {generating ? (
+        <GeneratePromptModal projectId={project.id} slug={project.slug} onClose={() => setGenerating(false)} onSaved={() => { setGenerating(false); after(); }} />
+      ) : null}
+
       {creating ? (
         <Modal title="New Prompt" onClose={() => setCreating(false)} wide>
           <ResourceForm config={FULL} projectId={project.id} tagSuggestions={tagSuggestions} submitLabel="Create" onCancel={() => setCreating(false)} onSubmit={create} />
@@ -176,6 +201,22 @@ export function PromptsPage() {
             <>
               <ConfirmButton className="btn danger" label="Delete" confirmLabel="Confirm delete" question="Delete this prompt and all its versions?" onConfirm={() => remove(viewing.id)} />
               <div className="spacer" />
+              <button className="btn" onClick={() => copyPrompt(viewing)}>
+                Copy
+              </button>
+              {viewing.status !== 'ARCHIVED' ? (
+                <ConfirmButton
+                  className="btn"
+                  label="Archive"
+                  confirmLabel="Confirm archive"
+                  question="Archive this prompt? It leaves the active lists but is never deleted."
+                  onConfirm={() => archivePrompt(viewing.id)}
+                />
+              ) : (
+                <span className="dim tiny" style={{ alignSelf: 'center' }}>
+                  Archived — restore via Edit metadata
+                </span>
+              )}
               <button className="btn" onClick={() => setAddingVersion(true)}>
                 + Add version
               </button>
@@ -189,6 +230,11 @@ export function PromptsPage() {
           }
         >
           <dl className="kv">
+            <dt>Status</dt>
+            <dd>
+              <Badge value={viewing.status} />
+              {viewing.isReusable ? <span className="dim tiny"> · reusable template</span> : null}
+            </dd>
             <dt>Category</dt>
             <dd>{viewing.category ? <Badge value={viewing.category.toUpperCase()} /> : '—'}</dd>
             <dt>Tool / model</dt>
@@ -310,5 +356,244 @@ function VersionForm({ onSubmit, onCancel }: { onSubmit: (p: Record<string, stri
         </button>
       </div>
     </form>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Generate prompt
+// ---------------------------------------------------------------------------
+
+/** The purposes the backend generator supports (mirrors PROMPT_PURPOSES). */
+const GENERATOR_PURPOSES = [
+  'Research',
+  'Architecture',
+  'Feature implementation',
+  'Debugging',
+  'Refactoring',
+  'Testing',
+  'Documentation',
+  'Deployment'
+];
+
+const PURPOSE_STORAGE_KEY = 'phub.promptPurpose';
+
+/** Where each missing context item can be recorded in this project. */
+const FILL_TARGETS: Record<string, { tab: string; label: string }> = {
+  description: { tab: 'idea', label: 'Idea / description' },
+  problem: { tab: 'idea', label: 'Idea / problem statement' },
+  requirements: { tab: 'requirements', label: 'Requirements' },
+  features: { tab: 'features', label: 'Features' },
+  tasks: { tab: 'tasks', label: 'Tasks' },
+  issues: { tab: 'bugs', label: 'Bugs' },
+  decisions: { tab: 'decisions', label: 'Decisions' },
+  techStack: { tab: 'architecture', label: 'Architecture / tech stack' },
+  milestones: { tab: 'milestones', label: 'Milestones' },
+  deployments: { tab: 'deployments', label: 'Deployments' },
+  notes: { tab: 'notes', label: 'Notes' },
+  research: { tab: 'research', label: 'Research' }
+};
+
+interface ReadinessItem {
+  key: string;
+  label: string;
+  required: boolean;
+  present: boolean;
+}
+
+interface ReadinessReport {
+  purpose: string;
+  ready: boolean;
+  items: ReadinessItem[];
+  missingRequired: string[];
+  missingRecommended: string[];
+}
+
+interface PromptDraft {
+  title: string;
+  category: string;
+  purpose: string;
+  content: string;
+}
+
+/**
+ * Offline prompt generator: readiness checklist + editable draft assembled from
+ * the project's own records. Nothing here calls an AI provider - "Proceed
+ * anyway" just saves the draft as a normal prompt (status DRAFT).
+ */
+function GeneratePromptModal({
+  projectId,
+  slug,
+  onClose,
+  onSaved
+}: {
+  projectId: number;
+  slug: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { toast } = useApp();
+  const [purpose, setPurpose] = useState(() => sessionStorage.getItem(PURPOSE_STORAGE_KEY) || 'Feature implementation');
+  const [readiness, setReadiness] = useState<ReadinessReport | null>(null);
+  const [draft, setDraft] = useState<PromptDraft | null>(null);
+  const [failures, setFailures] = useState<string[]>([]);
+  const [content, setContent] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showFill, setShowFill] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    sessionStorage.setItem(PURPOSE_STORAGE_KEY, purpose);
+    setLoading(true);
+    setError(null);
+    setShowFill(false);
+    api
+      .post<{ readiness: ReadinessReport; draft: PromptDraft }, { failures?: { source: string }[] }>(
+        `/projects/${projectId}/prompts/generate`,
+        { purpose }
+      )
+      .then(res => {
+        if (cancelled) return;
+        setReadiness(res.data.readiness);
+        setDraft(res.data.draft);
+        setContent(res.data.draft.content);
+        setFailures((res.meta?.failures ?? []).map(f => f.source));
+        setLoading(false);
+      })
+      .catch(err => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : String(err));
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, purpose]);
+
+  const proceed = async () => {
+    if (!draft) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await api.post(`/projects/${projectId}/prompts`, {
+        title: draft.title,
+        purpose: draft.purpose,
+        category: draft.category,
+        text: content,
+        status: 'DRAFT'
+      });
+      toast(readiness?.ready ? 'Prompt saved' : 'Draft saved despite missing information');
+      onSaved();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+      setSaving(false);
+    }
+  };
+
+  const missingRequired = (readiness?.missingRequired ?? []).map(key => ({
+    key,
+    ...(FILL_TARGETS[key] ?? { tab: 'notes', label: key })
+  }));
+
+  return (
+    <Modal
+      title="Generate prompt from project context"
+      onClose={onClose}
+      wide
+      footer={
+        <>
+          <button
+            className="btn"
+            onClick={() => setShowFill(v => !v)}
+            disabled={!readiness || readiness.missingRequired.length === 0}
+          >
+            Fill missing
+          </button>
+          <div className="spacer" />
+          <button className="btn" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button className="btn primary" onClick={proceed} disabled={saving || loading || !draft}>
+            {saving ? 'Saving…' : readiness?.ready ? 'Save prompt' : 'Proceed anyway'}
+          </button>
+        </>
+      }
+    >
+      <div className="field full">
+        <label htmlFor="gen-purpose">Purpose</label>
+        <select id="gen-purpose" value={purpose} onChange={e => setPurpose(e.target.value)}>
+          {GENERATOR_PURPOSES.map(p => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+        <span className="hint">
+          The draft is assembled from this project's records; no AI service is called. Your last purpose is remembered for this session.
+        </span>
+      </div>
+
+      {error ? <ErrorBox message={error} /> : null}
+      {saveError ? <ErrorBox message={saveError} /> : null}
+      {failures.length > 0 ? (
+        <div style={{ color: 'var(--red)', marginTop: 8 }}>
+          Some project sources could not be read ({failures.join(', ')}). The draft may be incomplete.
+        </div>
+      ) : null}
+
+      {loading ? (
+        <Loading />
+      ) : readiness && draft ? (
+        <>
+          <div style={{ marginTop: 10, fontWeight: 600 }}>
+            {readiness.ready ? (
+              <span style={{ color: 'var(--green)' }}>Ready — every required item is recorded.</span>
+            ) : (
+              <span style={{ color: 'var(--red)' }}>
+                Missing {readiness.missingRequired.length} required{' '}
+                {readiness.missingRequired.length === 1 ? 'item' : 'items'}.
+              </span>
+            )}
+          </div>
+          <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
+            {readiness.items.map(item => (
+              <li key={item.key}>
+                <span style={{ color: item.present ? 'var(--green)' : 'var(--red)' }}>{item.present ? '✓' : '✗'}</span>{' '}
+                {item.label}
+                {item.required ? <span className="dim tiny"> · required</span> : null}
+              </li>
+            ))}
+          </ul>
+
+          {showFill ? (
+            <div className="card" style={{ padding: 12, marginTop: 12 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Record the missing information here, then generate again:</div>
+              <ul style={{ margin: 0, paddingLeft: 20 }}>
+                {missingRequired.map(m => (
+                  <li key={m.key}>
+                    <Link to={`/projects/${slug}/${m.tab}`}>{m.label}</Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          <h4 style={{ fontSize: 12, textTransform: 'uppercase', color: 'var(--text-dim)', marginTop: 16 }}>
+            Draft — {draft.title}
+          </h4>
+          <textarea
+            rows={16}
+            value={content}
+            onChange={e => setContent(e.target.value)}
+            style={{ width: '100%', fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
+          />
+          <div className="dim tiny" style={{ marginTop: 6 }}>
+            Sections marked “Not provided in Project Hub.” have no recorded data. Edit freely — saving stores this as prompt v1 (status DRAFT).
+          </div>
+        </>
+      ) : null}
+    </Modal>
   );
 }

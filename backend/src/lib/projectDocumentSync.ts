@@ -12,9 +12,11 @@ import {
   MilestoneStatus,
   TaskStatus,
   IssueSeverity,
-  IssueStatus
+  IssueStatus,
+  PromptStatus
 } from '@prisma/client';
 import { prisma } from './prisma.js';
+import { appendPromptVersion } from './promptLibrary.js';
 import { loadProjectDocumentData, renderProjectDocument } from './projectDocument.js';
 import {
   BASELINE_VERSION,
@@ -108,7 +110,8 @@ export type EntityKey =
   | 'milestones'
   | 'tasks'
   | 'issues'
-  | 'notes';
+  | 'notes'
+  | 'prompts';
 
 export interface ChildChange {
   entity: EntityKey;
@@ -205,8 +208,23 @@ export interface ChildSpec {
   values(rec: ParsedRecord, warnings: SyncIssue[]): Record<string, string | Date | null>;
   /** Columns whose value must be one of a Prisma enum's members. */
   enums?: Record<string, readonly string[]>;
+  /**
+   * Columns Prisma stores as booleans. The document says `Yes`/`No`, `values()`
+   * yields the strings `'true'`/`'false'`, and the change set carries the real
+   * boolean - a string written into a Boolean column would be rejected on apply.
+   */
+  booleans?: string[];
   /** Prisma relation name / delegate for writes. */
-  delegate: 'researchEntry' | 'researchQuestion' | 'requirement' | 'feature' | 'architectureDecision' | 'techStackItem' | 'databaseTable' | 'apiEndpoint' | 'milestone' | 'task' | 'issue' | 'note';
+  delegate: 'researchEntry' | 'researchQuestion' | 'requirement' | 'feature' | 'architectureDecision' | 'techStackItem' | 'databaseTable' | 'apiEndpoint' | 'milestone' | 'task' | 'issue' | 'note' | 'prompt';
+  /**
+   * A write the plain column update cannot express, run inside the same
+   * transaction immediately after the row is written. The document has already
+   * set the columns; the hook does the bookkeeping those columns imply. Only
+   * prompts have one: `prompts.content` is denormalized from the newest version
+   * (lib/promptLibrary.ts), so a document that writes content must also append
+   * the version that keeps the two equal.
+   */
+  afterApply?: (client: Prisma.TransactionClient, row: any, change: ChildChange) => Promise<void>;
 }
 
 function enumOr(
@@ -469,6 +487,72 @@ export const SPECS: ChildSpec[] = [
     rowKey: (row) => row.title ?? '',
     values: (rec): Record<string, string | Date | null> =>
       rec.detail != null ? { content: rec.detail } : {}
+  },
+  {
+    entity: 'prompts',
+    label: 'AI prompt',
+    delegate: 'prompt',
+    titleColumn: 'title',
+    key: (rec) => splitCodeAndTitle(rec.title).code,
+    rowKey: (row) => row.code,
+    enums: { status: Object.values(PromptStatus) as string[] },
+    booleans: ['isReusable'],
+    values: (rec, warnings) => {
+      const out: Record<string, string | Date | null> = {};
+      // The title is a real column here (prompts are code-keyed, so the title is
+      // not the identity) and it is nullable: an absent title is expressed as
+      // null, which means "nothing to write", never "clear it" and never "use the
+      // code as the title".
+      const title = plainTitle(rec);
+      out.title = title === '' ? null : title;
+
+      const category = attributeValue(rec.attributes, 'Category');
+      if (category !== null) out.category = category;
+
+      // Absent means "not expressed": the stored status is left alone rather than
+      // falling back to a default that would silently overwrite it.
+      const status = enumOr(
+        attributeValue(rec.attributes, 'Status'),
+        Object.values(PromptStatus) as string[],
+        '',
+        'AI prompt',
+        'status',
+        warnings
+      );
+      if (status) out.status = status;
+
+      const reusable = attributeValue(rec.attributes, 'Reusable');
+      if (reusable !== null) {
+        const token = enumToken(reusable);
+        if (token === 'YES') out.isReusable = 'true';
+        else if (token === 'NO') out.isReusable = 'false';
+        else {
+          warnings.push({
+            code: 'UNRECOGNISED_ENUM_VALUE',
+            message: `AI prompt reusable value ${JSON.stringify(reusable)} is not Yes or No. It was left unchanged.`
+          });
+        }
+      }
+
+      const purpose = attributeValue(rec.attributes, 'Purpose');
+      if (purpose !== null) out.purpose = purpose;
+
+      // content is a single reversible column, unlike the multi-column detail
+      // joins in FIELD FIDELITY, so the detail block IS synchronized.
+      if (rec.detail != null) out.content = rec.detail;
+      return out;
+    },
+    afterApply: async (client, row, change) => {
+      const contentTouched = change.action === 'create' || change.changes.some((c) => c.field === 'content');
+      if (!contentTouched) return;
+      // `content` was just written; this appends the version that records the
+      // same text, so content stays equal to the newest version's text.
+      await appendPromptVersion(client, row, {
+        text: row.content ?? '',
+        response: null,
+        changes: change.action === 'create' ? 'Created from PROJECT.md' : 'Edited in PROJECT.md'
+      });
+    }
   }
 ];
 
@@ -584,7 +668,11 @@ function diffRecord(
   if (!row) {
     const changes = Object.entries(values)
       .filter(([, v]) => v !== '' && v != null)
-      .map(([field, to]) => ({ field, from: null as unknown, to }));
+      .map(([field, to]) => ({
+        field,
+        from: null as unknown,
+        to: spec.booleans?.includes(field) ? to === 'true' : to
+      }));
     // The identity column is mandatory on insert and is not one of `values` for
     // code-keyed entities, so it is added from the key itself. Without it Prisma
     // rejects the insert ("Argument `code` is missing") and the whole transaction
@@ -651,6 +739,10 @@ function diffRecord(
       if (current !== next) {
         changes.push({ field, from: row[field] ? new Date(row[field]).toISOString() : null, to: new Date(next).toISOString() });
       }
+      continue;
+    }
+    if (spec.booleans?.includes(field)) {
+      changes.push({ field, from: row[field] ?? null, to: value === 'true' });
       continue;
     }
     changes.push({ field, from: asText(row[field]), to: asText(value) });
@@ -948,7 +1040,8 @@ export const SECTION_FOR_ENTITY: Record<EntityKey, string> = {
   milestones: 'Milestones',
   tasks: 'Tasks',
   issues: 'Issues',
-  notes: 'Notes'
+  notes: 'Notes',
+  prompts: 'AI Prompts'
 };
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1174,12 @@ export interface ApplyOptions {
   markSynced?: boolean;
 }
 
+/** Columns Prisma stores as booleans always reach a write as real booleans. */
+function coerceValue(spec: ChildSpec, field: string, value: unknown): unknown {
+  if (!spec.booleans?.includes(field)) return value;
+  return value === true || value === 'true';
+}
+
 /**
  * Apply a change set inside a single transaction.
  *
@@ -1133,8 +1232,9 @@ export async function applyChangeSet(
 
       if (change.action === 'create') {
         const createData: Record<string, unknown> = { projectId };
-        for (const c of change.changes) createData[c.field] = c.to;
-        await delegate.create({ data: createData });
+        for (const c of change.changes) createData[c.field] = coerceValue(spec, c.field, c.to);
+        const created = await delegate.create({ data: createData });
+        if (spec.afterApply) await spec.afterApply(tx, created, change);
         appliedChildChanges.push({
           entity: change.entity,
           action: 'create',
@@ -1148,11 +1248,19 @@ export async function applyChangeSet(
         const updateData: Record<string, unknown> = {};
         for (const c of change.changes) {
           if (c.field === IDENTITY_COLUMN[spec.entity]) continue; // never rewrite identity
-          updateData[c.field] = c.to;
+          updateData[c.field] = coerceValue(spec, c.field, c.to);
         }
         const res = await delegate.updateMany({ where, data: updateData });
         if (res.count === 0) {
           throw new Error(`Could not locate the ${spec.label.toLowerCase()} with key ${change.key} to update it.`);
+        }
+        if (spec.afterApply) {
+          // updateMany returns no row, and the hook needs the values just written.
+          const row = await delegate.findFirst({ where });
+          if (!row) {
+            throw new Error(`Could not reload the ${spec.label.toLowerCase()} with key ${change.key} after updating it.`);
+          }
+          await spec.afterApply(tx, row, change);
         }
         appliedChildChanges.push({
           entity: change.entity,
@@ -1287,7 +1395,8 @@ const IDENTITY_COLUMN: Record<EntityKey, string> = {
   milestones: 'name',
   tasks: 'code',
   issues: 'code',
-  notes: 'title'
+  notes: 'title',
+  prompts: 'code'
 };
 
 /** Entities whose identity column is enforced unique in the database. */
@@ -1295,7 +1404,8 @@ const UNIQUE_IDENTITY_COLUMN: Partial<Record<EntityKey, string>> = {
   requirements: 'code',
   tasks: 'code',
   issues: 'code',
-  decisions: 'code'
+  decisions: 'code',
+  prompts: 'code'
 };
 
 
@@ -1325,6 +1435,7 @@ async function loadProjectDocumentDataWithClient(tx: Prisma.TransactionClient, p
       tasks: { orderBy: { code: 'asc' } },
       issues: { orderBy: { code: 'asc' } },
       notes: { orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }] },
+      prompts: { orderBy: { code: 'asc' } },
       deployments: { orderBy: [{ date: 'desc' }, { id: 'asc' }] },
       gitReferences: { orderBy: [{ date: 'desc' }, { id: 'asc' }] },
       developmentSessions: { orderBy: { number: 'asc' } }
@@ -1348,6 +1459,7 @@ async function loadProjectDocumentDataWithClient(tx: Prisma.TransactionClient, p
         'tasks',
         'issues',
         'notes',
+        'prompts',
         'deployments',
         'gitReferences',
         'developmentSessions'

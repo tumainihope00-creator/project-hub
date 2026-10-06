@@ -24,6 +24,11 @@ function toTagNames(raw: unknown): string[] {
 function initialValue(field: FieldDef, initial?: FormValues): unknown {
   const raw = initial?.[field.name];
   if (raw === undefined || raw === null) return '';
+  if (field.type === 'boolean') {
+    // Booleans travel as 'true'/'false' strings so the select matches the
+    // string-based form state; they are converted back on submit.
+    return raw === true || raw === 'true' ? 'true' : 'false';
+  }
   if (field.type === 'date') {
     const s = String(raw);
     return s.length >= 10 ? s.slice(0, 10) : s;
@@ -125,6 +130,7 @@ export function ResourceForm({
       }
       if (f.type === 'number' && v !== '' && v !== undefined) v = Number(v);
       if (f.type === 'relation') v = v === '' ? null : Number(v);
+      if (f.type === 'boolean') v = v === 'true' ? true : v === 'false' ? false : undefined;
       payload[f.name] = v;
     }
     try {
@@ -162,6 +168,12 @@ export function ResourceForm({
               </label>
               {f.type === 'textarea' ? (
                 <textarea {...common} rows={f.rows ?? 3} value={String(values[f.name] ?? '')} onChange={e => set(f.name, e.target.value)} />
+              ) : f.type === 'boolean' ? (
+                <select value={String(values[f.name] ?? '')} onChange={e => set(f.name, e.target.value)}>
+                  <option value="">—</option>
+                  <option value="true">Yes</option>
+                  <option value="false">No</option>
+                </select>
               ) : f.type === 'select' ? (
                 <select value={String(values[f.name] ?? '')} onChange={e => set(f.name, e.target.value)}>
                   <option value="">—</option>

@@ -6,6 +6,7 @@ import { prisma } from '../lib/prisma.js';
 import { intFromQuery } from '../lib/validation.js';
 import type { Ctx, ResourceDef } from '../resources.js';
 import { taggableKeyFor, setTags, tagsFor } from '../lib/tags.js';
+import { appendPromptVersion, writePromptContent } from '../lib/promptLibrary.js';
 
 function pad(n: number, width = 3): string {
   return String(n).padStart(width, '0');
@@ -34,23 +35,6 @@ async function nextNumber(def: ResourceDef, projectId: number): Promise<number |
   });
   const max = (rows as Array<{ number: number | null }>).reduce((m, r) => Math.max(m, r.number ?? 0), 0);
   return max + 1;
-}
-
-async function createVersion(row: { id: number; projectId: number; code: string }, input: any): Promise<void> {
-  const existing = await prisma.promptVersion.count({ where: { promptId: row.id } });
-  const version = await prisma.promptVersion.create({
-    data: {
-      promptId: row.id,
-      version: existing + 1,
-      text: input.text ?? '',
-      response: input.response ?? null,
-      changes: 'Initial version'
-    }
-  });
-  await prisma.prompt.update({
-    where: { id: row.id },
-    data: { finalVersionId: version.id }
-  });
 }
 
 async function createDocumentVersion(docId: number, title: string, content: string, reason?: string | null): Promise<void> {
@@ -122,13 +106,25 @@ export function resourceRouter(def: ResourceDef): Router {
       // Generic equality filters (status, priority, type, result, environment...)
       for (const [key, value] of Object.entries(req.query)) {
         if (['q', 'page', 'pageSize', 'sort', 'order'].includes(key)) continue;
-        if (typeof value === 'string' && value.length > 0) where[key] = value;
+        if (typeof value === 'string' && value.length > 0) {
+          // The one boolean column exposed as a filter (Phase 8 reusable flag).
+          // Everything else stays a string comparison, so a text column whose
+          // value happens to be "true" still matches itself.
+          where[key] = key === 'isReusable' && (value === 'true' || value === 'false') ? value === 'true' : value;
+        }
       }
 
       if (q && def.searchFields?.length) {
         where.OR = def.searchFields.map(field => ({
           [field]: { contains: q, mode: 'insensitive' }
         }));
+      }
+
+      // Archived prompts are kept, not deleted, and are not part of the default
+      // active list: asking for no particular status means "the active ones".
+      // An explicit ?status=ARCHIVED (or any other status) is how they are read.
+      if (def.path === 'prompts' && !('status' in where)) {
+        where.status = { not: 'ARCHIVED' };
       }
 
       const [rows, total] = await Promise.all([
@@ -180,9 +176,26 @@ export function resourceRouter(def: ResourceDef): Router {
           include: def.include
         });
       } else if (def.path === 'prompts') {
+        // The prompt row and its first version are written together: a prompt
+        // without content, or content without a version, would break the invariant
+        // that prompts.content equals the newest version's text (lib/promptLibrary).
         const { text: _text, response: _response, ...promptData } = input;
-        row = await delegate().create({ data: { projectId, ...promptData } });
-        await createVersion(row, input);
+        await prisma.$transaction(async (tx) => {
+          // `promptData` is a rest-spread of the validated input: its type carries
+          // only an index signature, which cannot satisfy Prompt's required `code`
+          // for the compiler even though the key is present at runtime.
+          const data: any = {
+            projectId,
+            ...promptData,
+            content: typeof input.text === 'string' ? input.text : ''
+          };
+          row = await tx.prompt.create({ data });
+          await appendPromptVersion(tx, row, {
+            text: typeof input.text === 'string' ? input.text : '',
+            response: typeof input.response === 'string' ? input.response : null,
+            changes: 'Initial version'
+          });
+        });
       } else {
         row = await delegate().create({ data: { projectId, ...input } });
       }
@@ -229,7 +242,13 @@ export function resourceRouter(def: ResourceDef): Router {
 
       const input: Record<string, any> = { ...parsed.data };
       applyDerived(def.model, input);
+      // Prompt text is not a column write: an edit becomes a new immutable version
+      // plus the denormalized prompts.content, both in one transaction below.
+      let promptText: string | undefined;
+      let promptResponse: string | undefined;
       if (def.path === 'prompts') {
+        promptText = typeof input.text === 'string' ? input.text : undefined;
+        promptResponse = typeof input.response === 'string' ? input.response : undefined;
         delete input.text;
         delete input.response;
       }
@@ -251,6 +270,22 @@ export function resourceRouter(def: ResourceDef): Router {
           meta.currentVersion = current.currentVersion + 1;
         }
         row = await prisma.projectDocument.update({ where: { id: current.id }, data: meta, include: def.include });
+      } else if (def.path === 'prompts') {
+        // Metadata and text move together: the row update, the new content column
+        // and the version that records it are one transaction, so a failed text
+        // write cannot leave content and history disagreeing.
+        row = await prisma.$transaction(async (tx) => {
+          const updated = await tx.prompt.update({ where: { id: current.id }, data: input });
+          if (promptText !== undefined) {
+            await writePromptContent(tx, updated, promptText, {
+              source: 'Project Hub',
+              response: promptResponse ?? null
+            });
+          }
+          return updated;
+        });
+        // Re-read so the response carries the version that was just appended.
+        row = await delegate().findFirst({ where: { id: current.id }, ...(def.include ? { include: def.include } : {}) });
       } else {
         row = await delegate().update({ where: { id: current.id }, data: input });
       }
@@ -422,16 +457,15 @@ export function promptVersionRouter(): Router {
       const changes = typeof req.body.changes === 'string' ? req.body.changes : null;
       const reason = typeof req.body.reason === 'string' ? req.body.reason : null;
 
-      const count = await prisma.promptVersion.count({ where: { promptId: id } });
-      const version = await prisma.promptVersion.create({
-        data: { promptId: id, version: count + 1, text, response, changes, reason }
-      });
-      await prisma.prompt.update({
-        where: { id },
-        data: {
-          finalVersionId: version.id,
-          ...(req.body.title ? { title: req.body.title } : {})
-        }
+      // Appending a version also moves the current text: prompts.content is always
+      // the newest version's text, whichever path wrote it.
+      const version = await prisma.$transaction(async (tx) => {
+        const created = await appendPromptVersion(tx, { id }, { text, response, changes, reason });
+        await tx.prompt.update({
+          where: { id },
+          data: { content: text, ...(req.body.title ? { title: req.body.title } : {}) }
+        });
+        return created;
       });
       await logActivity({
         projectId,
@@ -440,7 +474,8 @@ export function promptVersionRouter(): Router {
         relatedType: 'prompt',
         relatedId: id
       });
-      res.status(201).json({ data: version });
+      const created = await prisma.promptVersion.findUnique({ where: { id: version.id } });
+      res.status(201).json({ data: created });
     } catch (e) {
       next(e);
     }

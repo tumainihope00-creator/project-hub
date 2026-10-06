@@ -185,6 +185,11 @@ Base URL: `http://localhost:4000/api`
 | GET    | `/dashboard`                          | Global totals + stage/status breakdown   |
 | GET    | `/dashboard/next-actions`             | Cross-project suggested next actions     |
 | GET    | `/search`                             | Global search                            |
+| GET    | `/prompts`                            | Cross-project prompt search (`?q=`, `?projectId=`, `?reusable=`, `?status=`) |
+| GET    | `/prompts/:id`                        | One prompt anywhere, with its history    |
+| POST   | `/projects/:id/prompts/generate`      | Offline prompt draft + readiness checklist |
+| POST   | `/projects/:id/prompts/:pid/copy`     | Duplicate a prompt (`targetProjectId?`)  |
+| POST   | `/projects/:id/prompts/:pid/archive`  | Archive (status only, never deletes)     |
 | GET    | `/tags`                               | Tags with usage counts                   |
 
 ### Project-scoped resources
@@ -345,6 +350,54 @@ There is no separate audit table for this: the timeline is the history, and
 
 ---
 
+## AI prompt library & project context
+
+Prompts are first-class records and are **never executed**: Project Hub stores,
+versions and drafts prompt text, and using it with an AI tool is a human action
+outside the app. No AI provider is called anywhere in this phase.
+
+Each prompt has a stable code (`PROMPT-001`), an optional title, a category, a
+purpose, a **status** (`DRAFT → READY → USED → ARCHIVED`) and a **reusable**
+flag. Content lives in the append-only version history: `prompts.content` always
+equals the text of the newest version, and every content write — create, new
+version, PROJECT.md edit, conflict resolution — goes through one helper that
+appends the version in the same transaction.
+
+- **Archiving changes status, never deletes.** Archived prompts leave the default
+  lists; `?status=ARCHIVED` reads them back.
+- **Reusable prompts** (`isReusable`) are listed in generated drafts under
+  "Reusable prompts in this project".
+- **Search** (`q`) matches title, purpose, category, content, code and tags — on
+  the project list, on the cross-project `GET /api/prompts`, and in `GET /api/search`.
+
+### PROJECT.md
+
+Prompts render as an `## AI Prompts` section (bold code, optional title,
+`Category · Status · Reusable · Purpose` attributes, content as the detail block)
+and are a full synchronization citizen: hand edits are classified, previewed,
+applied and conflict-managed like every other section. An applied edit appends a
+prompt version whose `changes` records PROJECT.md as the source, so the version
+invariant holds through sync and conflict resolution alike.
+
+### Context builder & generator
+
+`POST /api/projects/:id/prompts/generate { purpose }` assembles a draft from the
+project's own records (requirements, features, tasks, issues, decisions, tech
+stack, milestones, deployments, notes, research, reusable prompts) and returns it
+with a readiness checklist for the chosen purpose — required and recommended items,
+what is missing, and where to record it. Missing information renders as
+`Not provided in Project Hub.`; nothing is ever invented. The endpoint always
+answers 200 (an unknown purpose is the only 400).
+
+In the UI, **Generate Prompt** on the Prompts tab opens the checklist plus an
+editable draft: *Fill missing* links to the pages where absent information can be
+recorded, *Proceed anyway* saves the draft as an ordinary `DRAFT` prompt (v1), and
+the last purpose is remembered for the browser session. **Copy** duplicates a
+prompt with a fresh code and history (cross-project copies drop record links),
+**Archive** is idempotent, and the draft context is built entirely offline.
+
+---
+
 ## Testing
 
 ```bash
@@ -371,13 +424,23 @@ keep PROJECT.md, manual), projects that predate the baseline, generated and AI-e
 documents, a failed synchronization applying nothing, rapid consecutive edits,
 and the recorded history.
 
+`backend/tests/promptPhase8.test.ts` covers the prompt library: create defaults and
+content/version pairing, metadata-only edits adding no version, scoped and global
+search, category and reusable filters, archive semantics, the `## AI Prompts`
+round trip through PROJECT.md (render, preview, sync, conflict, resolve), the
+generator's readiness checklist, missing-information honesty, proceeding anyway,
+filling the gaps and regenerating, same-project and cross-project copies, and a
+before/after database fingerprint asserting no non-`__TEST__` row changed.
+
 ---
 
 ## Status
 
 Implemented phases: foundation, project management, knowledge, AI development, delivery,
-history/portability, PROJECT.md ↔ database synchronization, and change-aware PROJECT.md
-monitoring and synchronization — including tests and production builds for both apps.
+history/portability, PROJECT.md ↔ database synchronization, change-aware PROJECT.md
+monitoring and synchronization, and AI prompt management (library, versioning, PROJECT.md
+section, context builder and offline prompt generator) — including tests and production
+builds for both apps.
 
 ### Known limitations / future work
 
