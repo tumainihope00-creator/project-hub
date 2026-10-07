@@ -103,7 +103,10 @@ export function V1PromptGenerator() {
       setCompleteOpen(false);
       setWizardOpen(false);
       const gaps = data.proceededWithGaps?.length ?? 0;
-      toast(gaps > 0 ? `${message} — ${gaps} gap${gaps === 1 ? '' : 's'} noted in the prompt` : message);
+      toast(
+        gaps > 0 ? `${message} — ${gaps} gap${gaps === 1 ? '' : 's'} noted in the prompt` : message,
+        gaps > 0 ? 'info' : undefined
+      );
     },
     [toast]
   );
@@ -260,7 +263,7 @@ export function V1PromptGenerator() {
       await navigator.clipboard.writeText(promptText);
       toast('Prompt copied');
     } catch {
-      toast('Copy failed — select the text manually');
+      toast('Copy failed — select the text manually', 'error');
     }
   };
 

@@ -484,7 +484,7 @@ function GeneratePromptModal({
         text: content,
         status: 'DRAFT'
       });
-      toast(readiness?.ready ? 'Prompt saved' : 'Draft saved despite missing information');
+      toast(readiness?.ready ? 'Prompt saved' : 'Draft saved despite missing information', readiness?.ready ? undefined : 'info');
       onSaved();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));

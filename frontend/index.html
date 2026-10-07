@@ -5,6 +5,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Project Hub</title>
     <meta name="description" content="Personal project lifecycle & AI development management system" />
+    <script>
+      /* No-flash theme bootstrap. Runs before the first paint so the correct
+         token block is live immediately — no white-to-dark or dark-to-light
+         flicker. Mirrors the valid id list from src/lib/theme.ts.
+         `?theme=<id>` overrides without persisting (used for previews). */
+      (function () {
+        var valid = ['ocean-light', 'emerald-light', 'violet-light', 'amber-light', 'midnight', 'graphite'];
+        var theme = null;
+        try {
+          theme = localStorage.getItem('phub.theme');
+        } catch (e) { /* storage unavailable */ }
+        if (valid.indexOf(theme) < 0) {
+          theme =
+            window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'midnight'
+              : 'ocean-light';
+        }
+        var fromUrl = (location.search.match(/[?&]theme=([a-z-]+)/) || [])[1];
+        if (fromUrl && valid.indexOf(fromUrl) >= 0) theme = fromUrl;
+        document.documentElement.setAttribute('data-theme', theme);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

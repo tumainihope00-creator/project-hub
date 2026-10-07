@@ -204,7 +204,7 @@ export function ProjectSettings() {
       </div>
 
       <h2 className="section">Danger zone</h2>
-      <div className="card" style={{ borderColor: '#6e2a26' }}>
+      <div className="card" style={{ borderColor: 'var(--danger)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 240 }}>
             <div style={{ fontWeight: 600 }}>{project.isArchived ? 'Reactivate project' : 'Archive project'}</div>

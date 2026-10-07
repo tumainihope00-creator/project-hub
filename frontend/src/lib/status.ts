@@ -1,84 +1,110 @@
-export const STATUS_COLORS: Record<string, string> = {
+/**
+ * Status colours are theme tokens, never raw hex.
+ *
+ * `statusColor()` returns a `var(--st-…)` reference so inline styles follow the
+ * active theme automatically; `statusSoft()` returns the matching tinted pill
+ * background. Both fall back to the neutral `gray` token for unknown values, so
+ * a new enum value the day it lands in the database still renders legibly.
+ */
+export type StatusToken =
+  | 'gray'
+  | 'slate'
+  | 'blue'
+  | 'cyan'
+  | 'purple'
+  | 'yellow'
+  | 'orange'
+  | 'pink'
+  | 'red'
+  | 'green';
+
+const STATUS_TOKENS: Record<string, StatusToken> = {
   // lifecycle stages
-  IDEA: '#8b949e',
-  RESEARCH: '#39c5cf',
-  PLANNING: '#58a6ff',
-  ARCHITECTURE: '#bc8cff',
-  BUILDING: '#d29922',
-  TESTING: '#db6d28',
-  DEPLOYMENT: '#f778ba',
-  PRODUCTION: '#3fb950',
-  MAINTENANCE: '#3fb950',
-  PAUSED: '#8b949e',
-  COMPLETED: '#3fb950',
-  ARCHIVED: '#6e7681',
-  ABANDONED: '#6e7681',
+  IDEA: 'gray',
+  RESEARCH: 'cyan',
+  PLANNING: 'blue',
+  ARCHITECTURE: 'purple',
+  BUILDING: 'yellow',
+  TESTING: 'orange',
+  DEPLOYMENT: 'pink',
+  PRODUCTION: 'green',
+  MAINTENANCE: 'green',
+  PAUSED: 'gray',
+  COMPLETED: 'green',
+  ARCHIVED: 'slate',
+  ABANDONED: 'slate',
   // tasks
-  TODO: '#8b949e',
-  IN_PROGRESS: '#58a6ff',
-  BLOCKED: '#f85149',
-  CANCELLED: '#6e7681',
+  TODO: 'gray',
+  IN_PROGRESS: 'blue',
+  BLOCKED: 'red',
+  CANCELLED: 'slate',
   // priorities / severities
-  LOW: '#8b949e',
-  MEDIUM: '#d29922',
-  HIGH: '#db6d28',
-  CRITICAL: '#f85149',
+  LOW: 'gray',
+  MEDIUM: 'yellow',
+  HIGH: 'orange',
+  CRITICAL: 'red',
   // issues / requirements / features / milestones
-  OPEN: '#f85149',
-  INVESTIGATING: '#d29922',
-  FIXING: '#db6d28',
-  RESOLVED: '#3fb950',
-  CLOSED: '#6e7681',
-  WONT_FIX: '#6e7681',
-  MONITORING: '#39c5cf',
-  PROPOSED: '#58a6ff',
-  APPROVED: '#3fb950',
-  IMPLEMENTED: '#3fb950',
-  DEFERRED: '#8b949e',
-  REJECTED: '#6e7681',
-  PLANNED: '#8b949e',
-  DROPPED: '#6e7681',
-  DELAYED: '#db6d28',
-  ACCEPTED: '#3fb950',
-  SUPERSEDED: '#6e7681',
-  ANSWERED: '#3fb950',
+  OPEN: 'red',
+  INVESTIGATING: 'yellow',
+  FIXING: 'orange',
+  RESOLVED: 'green',
+  CLOSED: 'slate',
+  WONT_FIX: 'slate',
+  MONITORING: 'cyan',
+  PROPOSED: 'blue',
+  APPROVED: 'green',
+  IMPLEMENTED: 'green',
+  DEFERRED: 'gray',
+  REJECTED: 'slate',
+  PLANNED: 'gray',
+  DROPPED: 'slate',
+  DELAYED: 'orange',
+  ACCEPTED: 'green',
+  SUPERSEDED: 'slate',
+  ANSWERED: 'green',
   // prompts
-  GENERATED: '#8b949e',
-  SUCCESSFUL: '#3fb950',
-  PARTIALLY_SUCCESSFUL: '#d29922',
-  FAILED: '#f85149',
-  NEEDS_MODIFICATION: '#db6d28',
+  GENERATED: 'gray',
+  SUCCESSFUL: 'green',
+  PARTIALLY_SUCCESSFUL: 'yellow',
+  FAILED: 'red',
+  NEEDS_MODIFICATION: 'orange',
   // deployments
-  LOCAL: '#8b949e',
-  DEVELOPMENT: '#58a6ff',
-  STAGING: '#d29922',
-  QUEUED: '#8b949e',
-  SUCCESSFUL_DEPLOY: '#3fb950',
-  ROLLED_BACK: '#db6d28',
+  LOCAL: 'gray',
+  DEVELOPMENT: 'blue',
+  STAGING: 'yellow',
+  QUEUED: 'gray',
+  SUCCESSFUL_DEPLOY: 'green',
+  ROLLED_BACK: 'orange',
   // git kinds
-  REPOSITORY: '#8b949e',
-  COMMIT: '#58a6ff',
-  BRANCH: '#bc8cff',
-  PULL_REQUEST: '#3fb950',
-  RELEASE: '#f778ba',
+  REPOSITORY: 'gray',
+  COMMIT: 'blue',
+  BRANCH: 'purple',
+  PULL_REQUEST: 'green',
+  RELEASE: 'pink',
   // tech categories
-  FRONTEND: '#58a6ff',
-  BACKEND: '#3fb950',
-  DATABASE: '#d29922',
-  HOSTING: '#bc8cff',
-  OTHER: '#8b949e',
+  FRONTEND: 'blue',
+  BACKEND: 'green',
+  DATABASE: 'yellow',
+  HOSTING: 'purple',
+  OTHER: 'gray',
   // generic
-  FUNCTIONAL: '#58a6ff',
-  NON_FUNCTIONAL: '#bc8cff',
-  CONSTRAINT: '#d29922',
-  PRODUCTION_ENV: '#3fb950'
+  FUNCTIONAL: 'blue',
+  NON_FUNCTIONAL: 'purple',
+  CONSTRAINT: 'yellow',
+  PRODUCTION_ENV: 'green'
 };
 
-export function statusColor(value: string | null | undefined): string {
-  if (!value) return '#6e7681';
-  return STATUS_COLORS[value] ?? '#8b949e';
+export function statusToken(value: string | null | undefined): StatusToken {
+  if (!value) return 'gray';
+  return STATUS_TOKENS[value] ?? 'gray';
 }
 
-export function withAlpha(hex: string, alpha: string): string {
-  return hex + alpha;
+/** `var(--st-blue)` — safe for `color`, `background`, `borderColor`. */
+export function statusColor(value: string | null | undefined): string {
+  return `var(--st-${statusToken(value)})`;
+}
+
+/** `var(--st-blue-soft)` — tinted pill/chip background for the same status. */
+export function statusSoft(value: string | null | undefined): string {
+  return `var(--st-${statusToken(value)}-soft)`;
 }

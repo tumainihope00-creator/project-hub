@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useParams } from 'react-router-dom';
+import { ChevronRight } from 'lucide-react';
 import { api } from '../api/client';
 import { useApi } from '../lib/useApi';
 import { ProjectContext } from '../context/ProjectContext';
@@ -82,7 +83,10 @@ export function ProjectLayout() {
         statusChange?: { warning?: { message: string } };
       }>(`/projects/${project.id}/status`, { stage });
       const warning = res.data.statusChange?.warning;
-      toast(warning ? `Status → ${humanize(stage)} — ${warning.message}` : `Status → ${humanize(stage)}`);
+      toast(
+        warning ? `Status → ${humanize(stage)} — ${warning.message}` : `Status → ${humanize(stage)}`,
+        warning ? 'info' : undefined
+      );
       reload();
       window.dispatchEvent(new CustomEvent('data-changed'));
     } finally {
@@ -101,13 +105,13 @@ export function ProjectLayout() {
     <ProjectContext.Provider value={{ project, reload }}>
       <div>
         <div style={{ padding: '16px 24px 0', maxWidth: 1400 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <Link to="/projects" className="dim tiny">
-              ← Projects
-            </Link>
-            {project.isArchived ? <Badge value="ARCHIVED" /> : null}
-            <h1 style={{ fontSize: 20, margin: 0, letterSpacing: '-0.3px' }}>{project.name}</h1>
-            <span className="mono dim tiny">{project.slug}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div className="crumbs">
+              <Link to="/projects">Projects</Link>
+              <ChevronRight size={13} />
+              <span className="cur">{project.name}</span>
+              {project.isArchived ? <Badge value="ARCHIVED" /> : null}
+            </div>
             <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
               {project.repositoryUrl ? (
                 <a className="btn sm" href={project.repositoryUrl} target="_blank" rel="noreferrer">
@@ -120,7 +124,7 @@ export function ProjectLayout() {
                 onChange={e => changeStage(e.target.value)}
                 style={{
                   background: 'var(--bg)',
-                  border: `1px solid ${statusColor(project.stage)}66`,
+                  border: `1px solid color-mix(in srgb, ${statusColor(project.stage)} 38%, transparent)`,
                   color: statusColor(project.stage),
                   borderRadius: 'var(--radius)',
                   padding: '4px 8px'

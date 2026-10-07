@@ -1,11 +1,14 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useId, useRef } from 'react';
 import { humanize } from '../resources';
-import { statusColor } from '../lib/status';
+import { statusColor, statusSoft } from '../lib/status';
 
 export function StageBadge({ stage }: { stage: string | null | undefined }) {
   const color = statusColor(stage);
   return (
-    <span className="badge" style={{ color, borderColor: color + '66', background: color + '1a' }}>
+    <span
+      className="badge"
+      style={{ color, background: statusSoft(stage), borderColor: 'color-mix(in srgb, currentColor 30%, transparent)' }}
+    >
       <span className="bdot" />
       {humanize(stage)}
     </span>
@@ -16,7 +19,10 @@ export function Badge({ value }: { value: string | null | undefined }) {
   if (!value) return <span className="dim">—</span>;
   const color = statusColor(value);
   return (
-    <span className="badge" style={{ color, borderColor: color + '66', background: color + '1a' }}>
+    <span
+      className="badge"
+      style={{ color, background: statusSoft(value), borderColor: 'color-mix(in srgb, currentColor 30%, transparent)' }}
+    >
       {humanize(value)}
     </span>
   );
@@ -45,7 +51,7 @@ export function EmptyState({ title, hint }: { title: string; hint?: string }) {
 
 export function ErrorBox({ message }: { message: string }) {
   return (
-    <div className="toast" role="alert">
+    <div className="error-box" role="alert">
       {message}
     </div>
   );
@@ -60,6 +66,12 @@ export function ProgressBar({ value, color }: { value: number; color?: string })
   );
 }
 
+/**
+ * Accessible dialog: focus moves in on open, cycles inside (Tab / Shift+Tab),
+ * Escape closes, and focus returns to whatever opened it on unmount.
+ * `onClose` is read through a ref so parent re-renders never restart the trap
+ * (typing inside a modal must not steal focus).
+ */
 export function Modal({
   title,
   onClose,
@@ -73,19 +85,61 @@ export function Modal({
   footer?: React.ReactNode;
   wide?: boolean;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const titleId = useId();
+
   useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    const node = dialogRef.current;
+    const focusables = () =>
+      Array.from(
+        node?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        ) ?? []
+      ).filter(el => el.offsetParent !== null || el === document.activeElement);
+
+    const initial = focusables()[0];
+    (initial ?? node)?.focus();
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const els = focusables();
+      if (els.length === 0) return;
+      const first = els[0];
+      const last = els[els.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      opener?.focus?.();
+    };
+  }, []);
 
   return (
     <div className="modal-overlay" onMouseDown={e => e.target === e.currentTarget && onClose()}>
-      <div className={wide ? 'modal wide' : 'modal'}>
+      <div
+        className={wide ? 'modal wide' : 'modal'}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        ref={dialogRef}
+        tabIndex={-1}
+      >
         <div className="modal-head">
-          <h3>{title}</h3>
+          <h3 id={titleId}>{title}</h3>
           <button className="x" onClick={onClose} aria-label="Close">
             ×
           </button>

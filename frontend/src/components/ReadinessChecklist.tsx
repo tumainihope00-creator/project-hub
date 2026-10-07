@@ -126,7 +126,7 @@ function ChecklistItem({
 /** Compact one-line state used in the wizard header. */
 export function StatusPill({ status }: { status: ReadinessStatus }) {
   return (
-    <span className="rc-pill" style={{ color: STATUS_COLOR[status], borderColor: STATUS_COLOR[status] + '55' }}>
+    <span className="rc-pill" style={{ color: STATUS_COLOR[status], borderColor: `color-mix(in srgb, ${STATUS_COLOR[status]} 38%, transparent)` }}>
       <span aria-hidden="true">{STATUS_GLYPH[status]}</span>
       {STATUS_LABEL[status]}
     </span>

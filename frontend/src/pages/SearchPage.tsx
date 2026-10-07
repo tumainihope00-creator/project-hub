@@ -15,7 +15,7 @@ interface SearchItem {
 
 type SearchGroups = Record<string, SearchItem[]>;
 
-const GROUP_LABELS: Record<string, string> = {
+export const GROUP_LABELS: Record<string, string> = {
   projects: 'Projects',
   requirements: 'Requirements',
   features: 'Features',
