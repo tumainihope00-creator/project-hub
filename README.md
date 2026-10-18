@@ -87,6 +87,12 @@ p-hub/
    CORS_ORIGIN="http://localhost:5173"
    ```
 
+   The AI provider is optional: add `AI_PROVIDER_API_KEY` (and optionally the
+   other `AI_*` variables documented in `backend/.env.example`) to use the
+   **AI Workspace** tab. Everything else works without it, and the key can
+   instead be stored later from **Settings → AI Provider** — an environment key
+   takes precedence over a stored one.
+
 3. **Create the schema and seed data:**
 
    ```bash
@@ -190,6 +196,11 @@ Base URL: `http://localhost:4000/api`
 | POST   | `/projects/:id/prompts/generate`      | Offline prompt draft + readiness checklist |
 | POST   | `/projects/:id/prompts/:pid/copy`     | Duplicate a prompt (`targetProjectId?`)  |
 | POST   | `/projects/:id/prompts/:pid/archive`  | Archive (status only, never deletes)     |
+| GET    | `/ai/status`                          | Provider readiness, never the key        |
+| GET    | `/ai/providers`                       | Registered providers and suggested models |
+| GET/PUT| `/ai/settings`                        | Provider, model, enabled, timeout, write-only `apiKey` |
+| POST   | `/ai/generate`                        | Send a reviewed prompt (writes nothing)  |
+| GET    | `/ai/interactions/:id`                | One saved interaction, full detail       |
 | GET    | `/tags`                               | Tags with usage counts                   |
 
 ### Project-scoped resources
@@ -213,6 +224,8 @@ Special sub-routes:
 - `GET/POST /prompts/:id/versions` — list / append prompt versions
 - `GET /documents/:id/versions`, `PUT /documents/:id` with `content` — document versioning
 - `GET/POST/DELETE /features/:id/requirements[/:requirementId]` — link/unlink requirements
+- `GET /ai/context?sections=` — preview the exact context a request would send
+- `GET/POST /ai/interactions` — saved AI interactions for this project (list / save)
 
 PROJECT.md sub-routes (`/:key/project-document/...`):
 
@@ -238,8 +251,9 @@ PROJECT.md sub-routes (`/:key/project-document/...`):
 Global pages: **Dashboard**, **Portfolio**, **Search**, **Tags**.
 
 Each project (`/projects/:slug`) has tabs: Overview, Idea, Research, Requirements, Features,
-Tasks, Milestones, Architecture, Decisions, Development, Prompts, Bugs, Testing,
-Deployments, Production, Documentation, Notes, Activity, Settings.
+Tasks, Milestones, Architecture, Decisions, Development, Prompts, Prompt Generator,
+AI Workspace, Bugs, Testing, Deployments, Production, Documentation, Notes, Activity,
+Settings.
 
 A global quick-add palette and keyboard shortcuts are available from the layout.
 
@@ -398,6 +412,95 @@ prompt with a fresh code and history (cross-project copies drop record links),
 
 ---
 
+## AI provider integration & AI workspace
+
+The AI Workspace is the first phase that can actually *send* a prompt. The chain is
+deliberately shallow and each layer speaks only to the next:
+
+```
+AI Workspace (React)  →  AI Service (lib/ai/aiService.ts)
+                           ↓ builds the request, normalizes the result or failure
+                         Provider Adapter (lib/ai/providers/*)
+                           ↓ provider-specific HTTP
+                         AI Provider (external service)
+```
+
+Everything above the service knows only the provider-independent vocabulary in
+`lib/ai/types.ts`; the adapter layer owns the Authorization header, the request
+body shape and the response parsing. **The OpenAI Chat Completions adapter** is the
+only one registered today, chosen because most compatible endpoints (OpenAI,
+OpenRouter, DeepSeek, Groq, LM Studio, Ollama's OpenAI-compatible route) answer the
+same `POST {baseUrl}/chat/completions`. It is implemented with the platform `fetch`,
+so the backend gains no SDK dependency. Adding a second provider later is: one new
+file in `providers/`, one line in the `ADAPTERS` table of `registry.ts` — the
+workspace, routes, settings and history do not change.
+
+### Configuration
+
+| Value | Precedence |
+| ----- | ---------- |
+| API key | env `AI_PROVIDER_API_KEY` → stored `ai_api_key` (env wins) |
+| Provider | stored `ai_provider` → env `AI_PROVIDER` → `openai` |
+| Model | stored `ai_model` → env `AI_MODEL` → provider default |
+| Enabled | stored `ai_enabled` → env `AI_ENABLED` → `true` |
+| Timeout | stored `ai_timeout_ms` → env `AI_TIMEOUT_MS` → `60000` |
+| Base URL | env `AI_BASE_URL` only → provider default |
+| Response cap | env `AI_MAX_RESPONSE_CHARS` → `200000` |
+
+The stored values live in the existing `app_settings` table under five fixed keys
+and are edited from **Settings → AI Provider** (provider, model, timeout, enabled,
+write-only API key). The base URL is environment-only on purpose: a client-supplied
+URL would turn the backend into an open relay that posts secrets to attacker-chosen
+hosts, so no request body or query string can ever set it — both the settings and
+the generate schemas are `.strict()` and reject unknown fields outright.
+
+The API key never crosses the wire: settings and status report `apiKeyConfigured`
+and `apiKeySource`, never a value, and what is typed into Settings is written once
+and then unreadable. `.env` stays git-ignored (as it already was).
+
+### The request
+
+`POST /api/ai/generate { projectId, prompt, sections[], promptId?, model? }`:
+
+1. readiness — enabled, registered provider, key present, endpoint known;
+2. validation — the project exists and the optional `promptId` belongs to it;
+3. context — the Phase 8 builder renders only the selected sections server-side;
+   absent records keep the `Not provided in Project Hub.` marker, and an identity
+   header (name, stage, repository, tags) always travels with the request;
+4. dispatch to the adapter with a system instruction that frames project content
+   as data to be treated as text, never as instructions;
+5. normalization — response text (capped by `AI_MAX_RESPONSE_CHARS`), usage as the
+   provider reported it (`null` when absent, never invented), and the echo of what
+   was actually sent, so the caller can store an exact snapshot.
+
+**The endpoint writes nothing.** A failed or abandoned attempt leaves no permanent
+record and a retry cannot duplicate one: the interaction is persisted only by an
+explicit `POST /api/projects/:id/interactions`, which stores `SUCCEEDED` rows with
+snapshot columns (prompt text, context text, selected sections) so later edits
+cannot rewrite history. Failures are reported in the response of the failure
+itself.
+
+### Failures
+
+Every provider-side problem becomes an `AI_ERROR` with a stable
+`details.code`, a `retryable` flag and a `possibleAction` the UI can show:
+`DISABLED` / `MISSING_API_KEY` / `UNKNOWN_PROVIDER` / `INVALID_API_KEY` /
+`INVALID_MODEL` (400), `RATE_LIMIT` (429), `TIMEOUT` (504), `NETWORK` (503), and
+`PROVIDER_ERROR` / `MALFORMED_RESPONSE` / `EMPTY_RESPONSE` (502). The provider's
+own message is passed through length-capped and header-free; the key itself appears
+in no error, log or response.
+
+### Workspace UI
+
+The **AI Workspace** tab is a four-step flow: pick a stored prompt (or type a
+custom one), toggle context sections with a live preview of the exact text that
+will be sent, review prompt + context + model, then read the response rendered
+through the safe Markdown renderer. Responses are never executed and never act on
+the app. Saved interactions appear in a history column with a detail view showing
+the prompt, the context, the response and the usage as they were at the time.
+
+---
+
 ## Testing
 
 ```bash
@@ -432,15 +535,29 @@ generator's readiness checklist, missing-information honesty, proceeding anyway,
 filling the gaps and regenerating, same-project and cross-project copies, and a
 before/after database fingerprint asserting no non-`__TEST__` row changed.
 
+`backend/tests/aiPhase9.test.ts` covers the AI integration. No test ever talks to
+a real provider: a local `node:http` stub stands in for one and the backend is
+pointed at it through `AI_BASE_URL`. It asserts that status, providers and
+settings never return the key (before or after it is stored), that the settings
+endpoint is strict (no client-side base URL, known providers, bounded timeouts),
+that readiness failures arrive as the documented `AI_ERROR` codes, that a
+successful request carries the right key, model and system instruction and writes
+nothing, that context preview renders only the selected sections with the
+`Not provided` marker, that cross-project `promptId`s are refused on both paths,
+that 401/429/model-rejection/5xx/malformed/empty/timeout/offline responses are
+normalized, that oversized responses are capped, and that interactions are saved
+only explicitly with exact snapshots — plus the usual environment and settings
+snapshot/restore and database fingerprint.
+
 ---
 
 ## Status
 
 Implemented phases: foundation, project management, knowledge, AI development, delivery,
 history/portability, PROJECT.md ↔ database synchronization, change-aware PROJECT.md
-monitoring and synchronization, and AI prompt management (library, versioning, PROJECT.md
-section, context builder and offline prompt generator) — including tests and production
-builds for both apps.
+monitoring and synchronization, AI prompt management (library, versioning, PROJECT.md
+section, context builder and offline prompt generator), and AI provider integration with
+the AI workspace — including tests and production builds for both apps.
 
 ### Known limitations / future work
 

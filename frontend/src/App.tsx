@@ -18,6 +18,7 @@ import { ProductionPage } from './pages/ProductionPage';
 import { TestingPage } from './pages/TestingPage';
 import { PromptsPage } from './pages/PromptsPage';
 import { V1PromptGenerator } from './pages/V1PromptGenerator';
+import { AiWorkspacePage } from './pages/AiWorkspacePage';
 import { DocumentsPage } from './pages/DocumentsPage';
 import { ResourcePage } from './pages/ResourcePage';
 import { FeaturesPage } from './pages/FeaturesPage';
@@ -49,6 +50,7 @@ export default function App() {
               <Route path="development" element={<DevelopmentPage />} />
               <Route path="prompts" element={<PromptsPage />} />
               <Route path="prompt-generator" element={<V1PromptGenerator />} />
+              <Route path="ai-workspace" element={<AiWorkspacePage />} />
               <Route path="bugs" element={<ResourcePage configKey="issues" />} />
               <Route path="testing" element={<TestingPage />} />
               <Route path="deployments" element={<ResourcePage configKey="deployments" />} />

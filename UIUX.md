@@ -106,8 +106,8 @@ new enum value never renders as an unstyled surprise.
 
 Project tabs (in order): Overview (`end`), Idea, Research, Requirements,
 Features, Tasks, Milestones, Architecture, Decisions, Development, **AI
-Prompts**, **Prompt Generator**, Bugs, Testing, Deployments, Production,
-Documentation, Notes, Activity, Settings.
+Prompts**, **Prompt Generator**, **AI Workspace**, Bugs, Testing, Deployments,
+Production, Documentation, Notes, Activity, Settings.
 
 - The active tab is underlined (`border-bottom: 2px solid --accent`), tabs
   scroll horizontally when they overflow, and the sidebar highlights the
@@ -284,9 +284,37 @@ Like a resource page but with prompt-specific behavior:
 
 ### 8.6 Prompt Generator tab (V1)
 The older, richer generator: readiness-first flow with choice chips
-(`wz-choice`), progress dots, and the `rc-*` checklist system (section 8.7).
+(`wz-choice`), progress dots, and the `rc-*` checklist system (section 8.8).
 
-### 8.7 Readiness checklist UI (`rc-*` styles)
+### 8.7 AI Workspace tab
+The four-step send flow (`AiWorkspacePage.tsx`), all in one page:
+
+1. **Prompt** — choose a stored prompt (select, defaults to *Custom prompt*)
+   or type freely; picking a stored prompt loads its current text, which stays
+   editable. Model field with the provider's suggested list (datalist),
+   prefilled from the configured default.
+2. **Context** — checkbox chips for the 12 sections, each showing a green
+   `●` / gray `○` presence dot from `GET /api/projects/:id/ai/context`, plus
+   **Select sections with data**. The preview pane below shows the *exact*
+   text that will be sent, refreshed on every change; absent sections read
+   `Not provided in Project Hub.`
+3. **Review** — read-only `RequestPart` blocks for the prompt and the context,
+   the model, and **Send** (disabled with a reason when `/api/ai/status`
+   reports the provider as not configured, linking to Settings).
+4. **Response** — the answer in the safe Markdown renderer, a meta strip
+   (provider · model · duration · tokens when the provider reported them),
+   **Save to history** (explicit; nothing is written otherwise), **Copy**,
+   **Regenerate** (Retry keeps prompt and context). Provider failures render
+   as an `ErrorBox` with the backend's `possibleAction` line — e.g. "raise the
+   request timeout in Settings → AI Provider" — never a raw status code.
+
+The right-hand **history** column lists saved interactions for this project
+(newest first) and opens a detail modal with the prompt, the context snapshot,
+the response and usage as they were at the time. The preview pane degrades to
+an inline warning if the context read fails, and a red banner explains any
+provider-not-configured state instead of hiding Send silently.
+
+### 8.8 Readiness checklist UI (`rc-*` styles)
 Used by V1 Prompt Generator / ReadinessModal:
 - Header block with title, subtitle and a meta strip (purpose, tool, verdict).
 - System errors in a red `rc-error-box` (never silent).
@@ -298,19 +326,25 @@ Used by V1 Prompt Generator / ReadinessModal:
   left-accent "next step" note.
 - A 3-column evidence grid appears when complete.
 
-### 8.8 Documents, Architecture, Development, Production, Testing
+### 8.9 Documents, Architecture, Development, Production, Testing
 Custom pages combining tabs/sub-tabs with viewers: document list + version
 history + markdown viewer; architecture decisions/tech-stack tables;
 development sessions timeline; production/health summaries; testing views.
 All reuse the same header/toolbar/table/modal vocabulary.
 
-### 8.9 Activity, Tags, Search, Settings
+### 8.10 Activity, Tags, Search, Settings
 - **Activity**: full timeline grouped by day, filterable.
 - **Tags**: cloud + per-tag usage; `?tag=` deep link from the sidebar cloud.
 - **Search**: grouped result cards (`.search-result`: meta, title, snippet).
 - **Settings**: global (Projects Root browser with path validation, danger
   zone with two-step confirms) and per-project (rename, slug, archive,
-  import/export).
+  import/export). The global Settings page also holds **AI Provider**: a
+  readiness chip ("Configured ✓" / "Not configured" with the reason), provider
+  select, model input with the provider's suggestions, timeout, enabled
+  toggle, and the write-only API key row — the input is never prefilled, the
+  current state is shown as "Configured (environment variable / stored on this
+  machine)" without any value, and replacing or removing the key is an
+  explicit button.
 
 ---
 
@@ -379,6 +413,7 @@ frontend/src/
 ├── pages/
 │   ├── ResourcePage.tsx     generic list/detail/renderCell
 │   ├── PromptsPage.tsx      prompt library + GeneratePromptModal
+│   ├── AiWorkspacePage.tsx  4-step AI workspace + history
 │   ├── ProjectLayout.tsx    project header + tabs
 │   └── Dashboard / Portfolio / SearchPage / TagsPage / SettingsPage …
 ├── resources.ts             per-resource field/column/filter configs

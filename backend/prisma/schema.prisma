@@ -140,6 +140,15 @@ enum PromptStatus {
   ARCHIVED
 }
 
+// Phase 9: outcome of one saved AI interaction. FAILED exists so the schema can
+// describe a failed attempt if the user ever chooses to record one, but the
+// normal flow only persists successful responses - failed requests are retried,
+// not accumulated as permanent rows.
+enum AiInteractionStatus {
+  SUCCEEDED
+  FAILED
+}
+
 enum DeploymentEnvironment {
   LOCAL
   DEVELOPMENT
@@ -374,6 +383,7 @@ model Project {
   relationshipsTo   ProjectRelationship[] @relation("ProjectTo")
   attachments       Attachment[]
   generatorRuns     PromptGeneration[]
+  aiInteractions    AiInteraction[]
 
   @@index([stage])
   @@index([isArchived])
@@ -713,6 +723,54 @@ model AiSession {
   @@map("ai_sessions")
 }
 
+// Phase 9: one saved AI interaction - a single prompt sent to the configured
+// provider and the response that came back, persisted with everything needed to
+// understand it later without re-reading the provider.
+//
+// Deliberate choices:
+//   - promptText / contextText / responseText are snapshots. The prompt may be
+//     edited afterwards and the project context will certainly change; an
+//     interaction is history, so it keeps what was actually sent.
+//   - contextSections records which context keys were included, so the UI can
+//     show exactly what left the machine.
+//   - promptId is nullable and SetNull: an interaction can start from a free
+//     text prompt, and survives the prompt being deleted.
+//   - NO credential ever lives here. provider is a registry id (openai), never
+//     a URL or key; the key stays in .env / app_settings (see lib/ai/config.ts).
+//   - usage tokens are nullable and only written when the provider reported
+//     them; Project Hub never invents numbers and never computes money.
+model AiInteraction {
+  id        Int     @id @default(autoincrement())
+  projectId Int
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  promptId  Int?
+  prompt    Prompt? @relation(fields: [promptId], references: [id], onDelete: SetNull)
+
+  title     String?
+  provider  String // registry id, e.g. "openai"
+  model     String // the model actually used, e.g. "gpt-4o-mini"
+  status    AiInteractionStatus @default(SUCCEEDED)
+
+  // Snapshots of the request exactly as it was sent.
+  promptText      String
+  contextSections String[] @default([])
+  contextText     String   @default("")
+
+  responseText String  @default("")
+  error        String? // only meaningful when status = FAILED
+
+  inputTokens  Int?
+  outputTokens Int?
+  totalTokens  Int?
+  durationMs   Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([promptId])
+  @@map("ai_interactions")
+}
+
 model Prompt {
   id          Int           @id @default(autoincrement())
   projectId   Int
@@ -746,6 +804,10 @@ model Prompt {
 
   versions     PromptVersion[]
   generations  PromptGeneration[]
+  // Phase 9: one prompt can be sent many times; each attempt stays a separate,
+  // historically identifiable row (SetNull keeps interactions if the prompt
+  // itself is ever deleted).
+  aiInteractions AiInteraction[]
 
   @@unique([projectId, code])
   @@index([projectId])

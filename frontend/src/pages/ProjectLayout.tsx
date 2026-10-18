@@ -23,6 +23,7 @@ const TABS: { to: string; label: string; end?: boolean }[] = [
   { to: 'development', label: 'Development' },
   { to: 'prompts', label: 'AI Prompts' },
   { to: 'prompt-generator', label: 'Prompt Generator' },
+  { to: 'ai-workspace', label: 'AI Workspace' },
   { to: 'bugs', label: 'Bugs' },
   { to: 'testing', label: 'Testing' },
   { to: 'deployments', label: 'Deployments' },

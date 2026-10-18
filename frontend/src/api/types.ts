@@ -699,3 +699,109 @@ export interface PathProblem {
   message: string;
   possibleAction?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 9: AI provider integration & AI workspace
+// ---------------------------------------------------------------------------
+
+/**
+ * A registered provider as the frontend may see it. Descriptive only - the
+ * frontend never receives credentials and can never set the endpoint URL.
+ */
+export interface AiProviderInfo {
+  id: string;
+  label: string;
+  defaultModel: string;
+  models: readonly string[];
+}
+
+/** AI settings/status. Deliberately has no field that could carry a secret. */
+export interface AiSettings {
+  provider: string;
+  providerLabel: string | null;
+  model: string;
+  enabled: boolean;
+  timeoutMs: number;
+  maxResponseChars: number;
+  baseUrlSource: 'environment' | 'provider_default';
+  apiKeyConfigured: boolean;
+  apiKeySource: 'environment' | 'application' | null;
+}
+
+export interface AiStatus extends AiSettings {
+  configured: boolean;
+  reason: 'disabled' | 'missing_api_key' | 'unknown_provider' | null;
+  providers: AiProviderInfo[];
+}
+
+/** The context keys the user can choose from (mirrors the backend list). */
+export type AiContextKey =
+  | 'description'
+  | 'problem'
+  | 'requirements'
+  | 'features'
+  | 'tasks'
+  | 'issues'
+  | 'decisions'
+  | 'techStack'
+  | 'milestones'
+  | 'deployments'
+  | 'notes'
+  | 'research';
+
+export interface AiContextSection {
+  key: AiContextKey;
+  label: string;
+  present: boolean;
+  content: string;
+}
+
+export interface AiContextPreview {
+  project: { id: number; name: string; slug: string; stage: string };
+  presence: Record<AiContextKey, boolean>;
+  sections: AiContextSection[];
+  text: string;
+}
+
+export interface AiUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+}
+
+/** Normalized result of POST /api/ai/generate. */
+export interface AiGenerateResult {
+  text: string;
+  provider: string;
+  providerLabel: string;
+  model: string;
+  usage: AiUsage | null;
+  durationMs: number;
+  sectionKeys: AiContextKey[];
+  sections: AiContextSection[];
+  contextText: string;
+  prompt: string;
+  truncated: boolean;
+}
+
+/** One row of the per-project AI history. */
+export interface AiInteraction {
+  id: number;
+  projectId: number;
+  promptId: number | null;
+  promptCode: string | null;
+  title: string | null;
+  provider: string;
+  model: string;
+  status: string;
+  promptText: string;
+  contextSections: AiContextKey[];
+  contextText: string;
+  responseText: string;
+  error: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  durationMs: number | null;
+  createdAt: string;
+}

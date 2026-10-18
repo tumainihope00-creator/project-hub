@@ -34,7 +34,13 @@ export type ErrorCategory =
   // resolve, not a validation slip, and a filesystem refusal (permissions, a
   // read-only volume) is neither a bad request nor a plain system fault.
   | 'CONFLICT'
-  | 'FILESYSTEM_ERROR';
+  | 'FILESYSTEM_ERROR'
+  // Phase 9. Everything that can go wrong between "Send" and a usable AI
+  // response: missing/invalid provider credentials, rate limits, timeouts,
+  // network loss, provider-side failures. Kept apart from SYSTEM_ERROR so the
+  // UI can offer a Retry and word the message for the user instead of calling
+  // it an internal crash.
+  | 'AI_ERROR';
 
 export interface ApiErrorBody {
   message: string;

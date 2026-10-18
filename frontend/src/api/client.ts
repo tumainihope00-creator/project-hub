@@ -25,7 +25,11 @@ export type ApiErrorCategory =
   // and a filesystem refusal (permissions, a read-only volume) is neither a bad
   // request nor a plain system fault.
   | 'CONFLICT'
-  | 'FILESYSTEM_ERROR';
+  | 'FILESYSTEM_ERROR'
+  // Phase 9. AI provider failures (configuration, auth, rate limit, timeout,
+  // network, provider-side errors). The backend always words these for the
+  // user; the UI can offer a Retry.
+  | 'AI_ERROR';
 
 export class ApiError extends Error {
   status: number;

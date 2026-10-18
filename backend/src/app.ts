@@ -13,6 +13,7 @@ import { importRouter } from './routes/import.js';
 import settingsRouter from './routes/settings.js';
 import documentMonitorRouter from './routes/documentMonitor.js';
 import { globalPromptsRouter, projectPromptsRouter } from './routes/prompts.js';
+import { aiRouter, projectAiRouter } from './routes/ai.js';
 
 export function createApp() {
   const app = express();
@@ -50,6 +51,13 @@ export function createApp() {
 
   // Application settings (Projects Root). Application-wide, not project data.
   app.use('/api/settings', settingsRouter);
+
+  // Phase 9: AI provider status/configuration, prompt generation against the
+  // configured provider, and interaction lookup. API keys live server-side
+  // only; nothing under /api/ai returns one. Mounted before the generic
+  // resource routes so `/api/ai/...` is never read as a resource path.
+  app.use('/api/ai', aiRouter());
+  app.use('/api/projects/:projectId/ai', projectAiRouter());
 
   // Application-wide PROJECT.md monitoring (Phase 7). One centralized service
   // behind this router, never one per client.

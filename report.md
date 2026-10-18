@@ -3072,3 +3072,364 @@ In recommended order, each independently verifiable:
 
 Safety posture for Phase 9 is unchanged: additive migrations only, no destructive
 DB operations, fingerprint before/after, tests against `__TEST__` fixtures only.
+
+---
+
+# PHASE 9 IMPLEMENTATION REPORT - AI PROVIDER INTEGRATION & AI WORKSPACE
+
+Scope as specified: a provider-agnostic AI integration (AI Workspace -> AI
+Service -> Provider Adapter -> AI Provider), one OpenAI-compatible adapter,
+configuration through `backend/.env` and app settings with the API key never
+exposed to the frontend, server-side context control reusing the Phase 8
+context builder, explicit-only interaction saving, a four-step AI Workspace
+page with history, and an AI Provider section in Settings. The user's Phase 9
+specification superseded the Phase 9 items proposed at the end of the Phase 8
+report (section 12 there); those items remain open and are re-planned in
+section 11 below.
+
+## 1. FILES CHANGED
+
+11 modified, 5 new groups (13 new files), 1 new migration directory, 2
+documentation files.
+
+| File | Change |
+| ---- | ------ |
+| `backend/prisma/schema.prisma` | `AiInteractionStatus` enum; `AiInteraction` model; back-relations on `Project` and `Prompt` |
+| `backend/prisma/migrations/20261007090000_phase9_ai_interactions/migration.sql` | new - additive DDL (section 2) |
+| `backend/src/lib/ai/types.ts` | new - `AiProviderErrorCode`, `AiProviderError`, `AiUsage`, `AiMessage`, `AiGenerateRequest/Result`, `AiProviderAdapter`, `AiProviderInfo` |
+| `backend/src/lib/ai/providers/openai.ts` | new - the OpenAI-compatible adapter (section 4) |
+| `backend/src/lib/ai/registry.ts` | new - `ADAPTERS` table, `getAiProvider`, `listAiProviders`, `DEFAULT_PROVIDER_ID` |
+| `backend/src/lib/ai/config.ts` | new - precedence resolution, settings view, `saveAiSettings`, `AI_SETTING_KEYS`/`AI_ENV` |
+| `backend/src/lib/ai/context.ts` | new - `renderAiContext`, `renderContextSection`, `AI_CONTEXT_LABELS` (formats Phase 8 context, never reads the DB) |
+| `backend/src/lib/ai/aiService.ts` | new - `sendAiPrompt`, `requireReady`, `toApiError` (the only code that sends to a provider) |
+| `backend/src/lib/ai/interactions.ts` | new - `saveAiInteraction`, `listAiInteractions`, `getAiInteraction` |
+| `backend/src/routes/ai.ts` | new - `aiRouter()` + `projectAiRouter()` (section 6) |
+| `backend/src/app.ts` | mounts `/api/ai` and `/api/projects/:projectId/ai` |
+| `backend/src/lib/errors.ts` | new `AI_ERROR` category |
+| `backend/tests/aiPhase9.test.ts` | new - 17 tests, the specified scenarios (section 9) |
+| `backend/.env.example` | AI placeholder block with precedence notes |
+| `frontend/src/api/types.ts` | `AiProviderInfo`, `AiSettings`, `AiStatus`, `AiContextKey/Section/Preview`, `AiUsage`, `AiGenerateResult`, `AiInteraction` |
+| `frontend/src/api/client.ts` | `AI_ERROR` added to `ApiErrorCategory` |
+| `frontend/src/pages/AiWorkspacePage.tsx` | new - the four-step workspace + history (section 7) |
+| `frontend/src/pages/SettingsPage.tsx` | new `AiSettingsCard` (AI Provider section) |
+| `frontend/src/App.tsx` | `ai-workspace` route |
+| `frontend/src/pages/ProjectLayout.tsx` | AI Workspace tab (after Prompt Generator) |
+| `README.md` | new "AI provider integration & AI workspace" section, setup + API + test + status updates |
+| `UIUX.md` | new 8.7 AI Workspace tab, Settings AI Provider notes, route/tab/file-tree updates |
+| `report.md` | this report |
+
+`.gitignore` needed no change: `.env` was already ignored, and `backend/.env`
+still contains only `DATABASE_URL`, `BACKEND_PORT` and `CORS_ORIGIN`.
+
+## 2. MIGRATIONS
+
+One migration, applied to the live database with `prisma migrate deploy`
+(9 -> 10 migrations), strictly additive:
+
+- `CREATE TYPE "AiInteractionStatus" AS ENUM ('SUCCEEDED','FAILED')`.
+- `CREATE TABLE "ai_interactions"`: `id`, `projectId` (NOT NULL),
+  `promptId` (nullable), `title`, `provider`, `model`, `status` (NOT NULL,
+  default `SUCCEEDED`), `promptText`, `contextSections TEXT[]` (default `{}`),
+  `contextText`, `responseText`, `error`, `inputTokens`/`outputTokens`/
+  `totalTokens` (nullable), `durationMs`, `createdAt`.
+- Indexes `projectId, createdAt` and `promptId`.
+- Foreign keys: `projectId` `ON DELETE CASCADE`, `promptId` `ON DELETE SET NULL`
+  (an interaction outlives its prompt and keeps the snapshot text).
+- Back-relations `aiInteractions AiInteraction[]` on `Project` and `Prompt`.
+
+Nothing is dropped, renamed or altered; no existing row is touched.
+`prisma db pull --print` confirmed the live database matches the schema.
+
+## 3. ARCHITECTURE
+
+```
+AI Workspace (React)  ->  AI Service (lib/ai/aiService.ts)
+                            |  builds the request, normalizes result/failure
+                          Provider Adapter (lib/ai/providers/*)
+                            |  provider-specific HTTP
+                          AI Provider (external service)
+```
+
+- The service is the only layer that sees the database, project ids, file
+  paths and the key; adapters see only `AiGenerateRequest` (messages, model,
+  key, base URL, timeout) and return `AiGenerateResult` (text, usage, model).
+  Nothing provider-shaped crosses upward: routes, workspace and history speak
+  the vocabulary of `lib/ai/types.ts` only.
+- `sendAiPrompt` runs the fixed pipeline: readiness (enabled -> registered
+  provider -> key -> endpoint) -> request validation (project exists,
+  `promptId` belongs to the project) -> Phase 8 `buildPromptContext` ->
+  `renderAiContext(context, sections)` -> adapter -> cap, echo, normalize.
+  Its catch block converts `AiProviderError`, `AbortError` and any unexpected
+  fault into a normalized `AI_ERROR`; no raw stack trace can escape.
+- Registry: one `ADAPTERS` record. Adding provider B is one file in
+  `providers/` plus one line there - workspace, routes, settings and history
+  already speak the adapter interface.
+- Error model: new category `AI_ERROR` (backend `ErrorCategory`, frontend
+  `ApiErrorCategory`) with `details.code`, `details.provider/model`,
+  `details.retryable` and `possibleAction`. Status mapping:
+  `NOT_CONFIGURED`/`DISABLED`/`UNKNOWN_PROVIDER`/`MISSING_API_KEY`/
+  `INVALID_API_KEY`/`INVALID_MODEL` -> 400, `RATE_LIMIT` -> 429,
+  `TIMEOUT` -> 504, `NETWORK` -> 503,
+  `PROVIDER_ERROR`/`MALFORMED_RESPONSE`/`EMPTY_RESPONSE`/`UNKNOWN` -> 502.
+- Context control: no second context system. `lib/ai/context.ts` formats the
+  `PromptContext` the Phase 8 builder already produced - one builder, two
+  consumers (offline generator, AI workspace). A section is rendered only if
+  selected; a selected-but-empty section keeps `Not provided in Project Hub.`
+- Prompt-injection posture: project content travels behind a system
+  instruction that frames it as reference data, and the service performs no
+  actions of any kind - Phase 9 is an interaction system, not an agent.
+
+## 4. PROVIDER IMPLEMENTATION
+
+The single adapter is `openai` ("OpenAI (or compatible)"), chosen because the
+Chat Completions shape is what api.openai.com, OpenRouter, DeepSeek, Groq,
+LM Studio and Ollama's compatible route all speak - one adapter covers the
+current need and a path to local inference. Implemented with platform `fetch`
+(no SDK dependency, no provider client constructed anywhere else):
+
+- Request: `POST {baseUrl}/chat/completions`, `Authorization: Bearer <key>`,
+  body `{model, messages, stream:false}`, `AbortController` timer for the
+  configured timeout.
+- Success parsing: `choices[0].message.content` (string or
+  `MALFORMED_RESPONSE`), empty-after-trim -> `EMPTY_RESPONSE`, `usage.*`
+  mapped only when actually reported (otherwise `null`, never invented),
+  reported model falls back to the requested one.
+- HTTP failures -> codes: 401/403 `INVALID_API_KEY`, 429 `RATE_LIMIT`
+  (retryable), 400/404/422 -> `INVALID_MODEL` when the provider message looks
+  model-shaped, else `PROVIDER_ERROR`; 5xx `PROVIDER_ERROR` (retryable).
+  The provider's own message is passed through trimmed and clipped to 300
+  characters, header-free.
+- Transport failures: abort -> `TIMEOUT`; everything else -> `NETWORK` with
+  an optional socket code (`ECONNREFUSED`, `EAI_AGAIN`, ...) in parentheses.
+- Retryability defaults (`TIMEOUT`, `NETWORK`, `RATE_LIMIT`, `PROVIDER_ERROR`)
+  live in `AiProviderError`, so every code has one truth.
+- Suggested models (`gpt-4o-mini`, `gpt-4o`, `gpt-4.1-mini`, `gpt-4.1`,
+  `o4-mini`) are a picker convenience, explicitly not an allowlist - a
+  compatible endpoint can serve models the list cannot know.
+
+## 5. CONFIGURATION
+
+| Value | Precedence |
+| ----- | ---------- |
+| API key | env `AI_PROVIDER_API_KEY` -> stored `ai_api_key` (env wins) |
+| Provider | stored `ai_provider` -> env `AI_PROVIDER` -> `openai` |
+| Model | stored `ai_model` -> env `AI_MODEL` -> provider default |
+| Enabled | stored `ai_enabled` -> env `AI_ENABLED` -> `true` |
+| Timeout | stored `ai_timeout_ms` -> env `AI_TIMEOUT_MS` -> `60000` (clamped 1000-600000) |
+| Base URL | env `AI_BASE_URL` only -> provider default |
+| Response cap | env `AI_MAX_RESPONSE_CHARS` -> `200000` (clamped 1000-5000000) |
+
+- Stored values are five fixed `app_settings` keys (`AI_SETTING_KEYS`) - the
+  same table the Projects Root uses, still no generic "set any key" endpoint.
+  `saveAiSettings` accepts only known provider ids, bounded timeouts, a
+  1-100 character model and a key of at most 500 characters; an empty key
+  deletes the row.
+- Everything is re-read per request, so a settings change applies without a
+  restart and tests can control the environment precisely.
+- The base URL is environment-only by design: a client-supplied URL would
+  turn the backend into an open relay posting secrets to attacker-chosen
+  hosts. Both the settings and generate schemas are `.strict()`, so an
+  unknown field (including `baseUrl` or `apiKey` on generate) is a 400
+  validation error before any code reads it.
+- `backend/.env.example` documents every variable with the precedence rules
+  and the "never in PROJECT.md, a prompt, or a database record" warning.
+
+## 6. API CHANGES
+
+Application-wide (`aiRouter`, mounted at `/api/ai`):
+
+| Method | Route | Behavior |
+| ------ | ----- | -------- |
+| GET | `/api/ai/status` | `AiStatus`: provider/model/enabled/timeout, `configured` + `reason` (`disabled`/`missing_api_key`/`unknown_provider`), `apiKeyConfigured`/`apiKeySource`, `providers[]`. Never the key. |
+| GET | `/api/ai/providers` | Registered adapters (id, label, default model, models). |
+| GET | `/api/ai/settings` | The settings view (same redaction). |
+| PUT | `/api/ai/settings` | Partial update, `.strict()` body, optional write-only `apiKey` (empty/null clears). Unknown provider or out-of-range value -> 400. |
+| POST | `/api/ai/generate` | `{projectId, prompt, sections[], promptId?, model?}` -> `{data:{text, provider, providerLabel, model, usage, durationMs, sectionKeys, sections, contextText, prompt, truncated}, meta:{failures}}`. **Writes nothing.** |
+| GET | `/api/ai/interactions/:id` | One saved interaction with `promptCode`; 404 unknown, 400 non-integer. |
+
+Project-scoped (`projectAiRouter`, `mergeParams`):
+
+| Method | Route | Behavior |
+| ------ | ----- | -------- |
+| GET | `/api/projects/:id/ai/context?sections=` | The exact text a request would send: project identity block + selected sections with `present` flags and `Not provided in Project Hub.` markers. Unknown section key -> 400 with the allowed list; unknown project -> 404. No `sections` means preview everything. |
+| GET | `/api/projects/:id/interactions` | History, newest first, `promptCode` joined, `meta.total`. |
+| POST | `/api/projects/:id/interactions` | Explicit save, 201. Provider must be registered (400 otherwise), `promptId` must belong to the project (404), `status` is always `SUCCEEDED` - failures are never recorded, the successful retry is. Title defaults to the first non-empty line (clipped at 90 chars). Snapshot columns (`promptText`, `contextText`, `contextSections`) keep what was actually sent. |
+
+Validation: every body is a `.strict()` zod schema (`generateSchema`,
+`settingsSchema`, `saveInteractionSchema`, `usageSchema` with nullish -> null
+transforms); `sections` is `z.enum(CONTEXT_KEYS)` so only the 12 known keys
+exist. A `promptId` belonging to another project is refused on both the
+generate and the save path.
+
+## 7. UI CHANGES
+
+**AI Workspace tab** (`frontend/src/pages/AiWorkspacePage.tsx`, route
+`ai-workspace`, registered in `App.tsx` and `ProjectLayout.tsx` between
+Prompt Generator and Bugs) - one page, four steps:
+
+1. Prompt: stored prompt picker (loads its text, still editable) or custom;
+   model input prefilled from the configured default with the provider's
+   suggestion list as a datalist.
+2. Context: checkbox chips for the 12 sections with green/gray presence dots
+   from `GET .../ai/context`, **Select sections with data**, and a preview
+   pane showing the exact text that will be sent (refreshed on every change).
+   A context read failure degrades to an inline warning instead of hiding
+   the step.
+3. Review: read-only `RequestPart` blocks for prompt and context, the model,
+   and **Send**. When `/api/ai/status` reports the provider as not
+   configured, the reason is shown with a link to Settings instead of a
+   silent failure.
+4. Response: the answer through the existing safe Markdown renderer
+   (React elements, no innerHTML), a meta strip (provider, model, duration,
+   tokens when reported), **Save to history** (explicit - nothing is
+   persisted otherwise), **Copy**, **Regenerate**. Provider failures render
+   as `ErrorBox` plus the backend's `possibleAction` line, never a raw code.
+
+A history column lists saved interactions for the project (newest first) and
+opens a detail modal with prompt, context snapshot, response and usage as
+they were at the time.
+
+**Settings -> AI Provider** (`AiSettingsCard` in `SettingsPage.tsx`): a
+readiness chip ("Configured ?" / "Not configured" with the reason text),
+provider select, model input with datalist, timeout (seconds), enabled
+toggle, and the API key row. The key input is never prefilled (the server
+never sends a value - only `apiKeyConfigured` and `apiKeySource`), the
+current state reads "Configured (environment variable AI_PROVIDER_API_KEY /
+stored on this machine)", **Store/Replace key** is a write-only PUT, and
+**Remove stored key** is a two-step `ConfirmButton`. An environment key
+states that it takes precedence over any stored key.
+
+Supporting: `frontend/src/api/types.ts` (Phase 9 types), `client.ts`
+(`AI_ERROR`).
+
+## 8. SECURITY
+
+- **The key never crosses the wire.** Status, settings and providers report
+  `apiKeyConfigured`/`apiKeySource` only; tests assert the literal key is
+  absent from every Phase 9 response body, before and after it is stored,
+  including error responses. The frontend input is never prefilled, so there
+  is no value to reveal.
+- **No client-side endpoint control.** `AI_BASE_URL` is environment-only;
+  `.strict()` schemas reject `baseUrl`, `apiKey` and any other unknown field
+  on both `/ai/settings` and `/ai/generate`.
+- **Server-side context.** The client selects only keys from
+  `CONTEXT_KEYS`; the server renders them from its own builder. Arbitrary
+  files, paths or URLs can never arrive as "context".
+- **Prompt-injection posture.** Project content is embedded behind a system
+  instruction that marks it as reference data; responses are display-only
+  and can never modify the database, files, stage or configuration. No
+  automatic actions, no tool calls, no agent loop.
+- **Boundaries.** Cross-project `promptId` refused on generate (400) and
+  save (404); saved provider ids must be registered; ids are validated as
+  positive integers; unknown provider ids from the environment are caught by
+  `requireReady` before any network call.
+- **Hygiene.** `.env` remains git-ignored (no change needed) and contains
+  no AI key; `.env.example` carries placeholders plus the warning never to
+  put a key in PROJECT.md, STATUS.md or a prompt; the adapter never logs the
+  key, never throws it, and provider messages are clipped before they reach
+  an error body. `POST /generate` writes nothing, so failed or repeated
+  attempts leave no partial state.
+
+## 9. TESTS PERFORMED
+
+- `backend/tests/aiPhase9.test.ts` — **17 tests, all passing**, covering the
+  specified scenarios. **No test ever contacts a real provider**: a local
+  `node:http` stub is started on `127.0.0.1:0` and the backend is pointed at
+  it via `AI_BASE_URL`; success, 401, 429, model rejection, 5xx, non-JSON,
+  unexpected shape, empty content and a 2.5 s delay are all produced by that
+  stub, and the offline case uses a port that was bound and released again.
+  Covered: (1) status/providers/settings readiness without the key, (2)
+  readiness reasons surfaced instead of failing silently, (3) write-only key
+  storage (store -> never echoed -> clear -> row deleted), (4) settings
+  validation (unknown provider, bounded timeout, `.strict()` rejecting a
+  client `baseUrl`, empty body), (5) `MISSING_API_KEY`/`DISABLED`/
+  `UNKNOWN_PROVIDER` as `AI_ERROR` codes with `possibleAction`, plus 404 for
+  an unknown project, (6) successful generate asserting the outbound
+  `Authorization` header, path, model, `stream:false`, system/user message
+  roles, injection-framing instruction and that **no interaction row is
+  written**, (7) per-request model override and unknown fields refused, (8)
+  context preview - all 12 sections, presence flags, deselected data absent,
+  `Not provided in Project Hub.` markers, unknown section key -> 400, missing
+  project -> 404, (9) cross-project `promptId` refused on generate and save
+  but accepted in its own project, (10) 401 -> `INVALID_API_KEY` (400,
+  non-retryable), 429 -> `RATE_LIMIT` (429, retryable), model-shaped 400 ->
+  `INVALID_MODEL`, 500 -> `PROVIDER_ERROR` (502, retryable), (11)
+  malformed/empty responses -> 502 with no records created, (12) timeout ->
+  504 and connection refused -> 503 `NETWORK`, (13) response capping with
+  `truncated: true` and the visible marker, (14) explicit saves (derived vs.
+  explicit title, usage, snapshots, newest-first list, detail 404/400, junk
+  provider -> 400, foreign prompt -> 404, other project's history empty),
+  (15) route-mount regression (project `ai/*` sub-paths resolve, siblings
+  unaffected), (16) database fingerprint unchanged.
+- Suite safety: environment (`AI_*`) and the five stored AI settings are
+  snapshotted in `beforeAll` and restored in `afterAll`, so a developer's
+  real key and stored configuration survive the run untouched; every test
+  starts from "env only, no stored settings".
+- Full backend suite: **344/344 tests, 12 files**, exit 0.
+- Backend `npm run build` (prisma generate + tsc) clean; frontend
+  `tsc -b && vite build` clean; root `npm run build` clean.
+- Fingerprint identical before, during and after the suite (projects, tasks,
+  notes, prompts and now `ai_interactions`).
+
+## 10. PROBLEMS DISCOVERED
+
+1. **Mount-order concern (verified harmless).** `/api/projects/:projectId/ai`
+   looked like it could shadow sibling routes; Express `use` matches whole
+   segments, so `/ai` never captures `/ai-sessions` etc. Verified
+   empirically and pinned with a regression test rather than left as an
+   assumption.
+2. **Settings vs. status response shape.** `PUT /ai/settings` returns the
+   redacted settings view (no `configured`/`reason`); readiness lives on
+   `GET /ai/status`. The first test draft conflated them - the split is now
+   documented in section 6 and asserted explicitly. The UI reads status
+   after saving, so it always shows the reason.
+3. **Stored-value precedence can shadow checks within one test.** Setting
+   `enabled=false` persisted into the next assertion of the same test and
+   reported `disabled` where `missing_api_key`/`UNKNOWN_PROVIDER` was
+   expected. Fixed by ordering (and one explicit delete) - a reminder that
+   stored settings take precedence over env and must be cleared between
+   checks.
+4. **Test-harness `withEnv` initially restored from a stale snapshot**
+   (module-level vs. per-call), which would have leaked env changes between
+   assertions. Rewritten to snapshot exactly the names it touches, per call.
+5. **PUT returns 200 without `configured`.** Intentional (see 2) but easy to
+   misuse; if a future client wants one round-trip, returning `AiStatus` from
+   the PUT is a one-line change in `saveAiSettings`'s caller.
+6. **Carried forward from Phase 8, untouched here:** the `PROMPT-001` vs
+   `PROMPT-0001` padding inconsistency, the fingerprint script's `-1` counts
+   for two table names, and live-database test isolation.
+
+## 11. PHASE 10 PLAN (PROPOSED)
+
+In recommended order, each independently verifiable. The five items proposed
+at the end of the Phase 8 report that Phase 9 did not cover are folded in:
+
+1. **Second provider adapter** (e.g. Anthropic Messages or Gemini) - one file
+   plus one registry line; verifies the abstraction is genuinely
+   provider-agnostic rather than OpenAI-shaped.
+2. **Multi-turn conversations** - a `AiConversation` grouping interactions,
+   workspace conversation view, and a `messages` array assembled from the
+   thread (the adapter interface already takes `messages[]`).
+3. **Lifecycle automation + global prompt library page** (Phase 8 items 1-2):
+   mark `USED` when an interaction referencing a prompt is saved, one-click
+   `READY`, restore-from-archive, and a cross-project browse/copy UI over
+   `GET /api/prompts`.
+4. **One generator, not two** (Phase 8 item 3): point the V1 Prompt
+   Generator tab at `buildPromptContext`/`buildPromptDraft` so both surfaces
+   share one collector and one no-fabrication guarantee.
+5. **Streaming responses** - SSE from the adapter through the service to the
+   workspace (requires `stream:true` support in the adapter and a streaming
+   response route; the cap and the renderer already handle long text).
+6. **Usage rollups and interaction export** - per-project token/cost totals
+   from saved interactions, plus a read-only JSON/Markdown export of prompt
+   library and AI history (Phase 8 item 5).
+7. **Sync follow-ups from the Phase 7 plan** (Phase 8 item 4): record
+   identity in the conflict card, baseline adoption for the existing
+   projects.
+8. **Disposable test schema** for the suite (the long-standing Phase 3 gap),
+   so AI settings and fingerprints can be asserted without touching the live
+   database.
+
+Safety posture for Phase 10 is unchanged: additive migrations only, no
+destructive DB operations, fingerprint before/after, `__TEST__` fixtures
+only, and the API key stays server-side.
