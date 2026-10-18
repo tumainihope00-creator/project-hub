@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useParams } from 'react-router-dom';
-import { ChevronRight } from 'lucide-react';
-import { api } from '../api/client';
+import { ChevronRight, Code, FolderOpen } from 'lucide-react';
+import { api, ApiError } from '../api/client';
 import { useApi } from '../lib/useApi';
 import { ProjectContext } from '../context/ProjectContext';
 import { useApp } from '../context/AppContext';
@@ -39,6 +39,7 @@ export function ProjectLayout() {
   const { toast } = useApp();
   const { data: project, loading, error, reload } = useApi<FullProject>(slug ? `/projects/${slug}` : null);
   const [stageBusy, setStageBusy] = useState(false);
+  const [openBusy, setOpenBusy] = useState<'folder' | 'vscode' | null>(null);
 
   useEffect(() => {
     const handler = () => reload();
@@ -102,6 +103,26 @@ export function ProjectLayout() {
     window.dispatchEvent(new CustomEvent('data-changed'));
   };
 
+  // Open the workspace on this machine (File Explorer or VS Code). The backend
+  // re-derives the folder from the database record, so the id is the only input
+  // here. `openBusy` both shows feedback and guards against double-clicks; the
+  // failure message includes the backend's own "what to do next" text.
+  const openLocal = async (action: 'open-folder' | 'open-vscode') => {
+    if (openBusy) return;
+    const which = action === 'open-folder' ? 'folder' : 'vscode';
+    setOpenBusy(which);
+    try {
+      await api.post(`/projects/${project.id}/${action}`, {});
+      toast(action === 'open-folder' ? 'Opened the project folder in File Explorer' : 'Opened the project folder in VS Code');
+    } catch (e) {
+      const message = e instanceof ApiError ? e.message : 'The folder could not be opened.';
+      const hint = e instanceof ApiError ? e.possibleAction : undefined;
+      toast(hint ? `${message} ${hint}` : message, 'error');
+    } finally {
+      setOpenBusy(null);
+    }
+  };
+
   return (
     <ProjectContext.Provider value={{ project, reload }}>
       <div>
@@ -113,12 +134,32 @@ export function ProjectLayout() {
               <span className="cur">{project.name}</span>
               {project.isArchived ? <Badge value="ARCHIVED" /> : null}
             </div>
-            <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {project.repositoryUrl ? (
                 <a className="btn sm" href={project.repositoryUrl} target="_blank" rel="noreferrer">
                   Repo ↗
                 </a>
               ) : null}
+              <button
+                className="btn sm"
+                onClick={() => openLocal('open-folder')}
+                disabled={openBusy !== null}
+                title="Open this project's folder in File Explorer"
+                aria-label="Open project folder in File Explorer"
+              >
+                <FolderOpen size={14} />
+                {openBusy === 'folder' ? 'Opening…' : 'Open Folder'}
+              </button>
+              <button
+                className="btn sm"
+                onClick={() => openLocal('open-vscode')}
+                disabled={openBusy !== null}
+                title="Open this project's folder in Visual Studio Code"
+                aria-label="Open project folder in Visual Studio Code"
+              >
+                <Code size={14} />
+                {openBusy === 'vscode' ? 'Opening…' : 'Open in VS Code'}
+              </button>
               <select
                 value={project.stage}
                 disabled={stageBusy}

@@ -21,13 +21,11 @@ function Check({ ok, label }: { ok: boolean | null | undefined; label: string })
 /**
  * Shows the project's physical workspace and whether it is still on disk.
  *
- * There is deliberately no "Open folder" button. Project Hub is a browser app
- * and the web platform gives a page no way to open a local directory in the
- * operating system's file manager - the File System Access API is
- * permission-gated, not universally supported, and would be a dead button
- * everywhere else. The path is shown and can be copied instead, which is honest
- * about what the architecture can actually do. VS Code integration is a later
- * phase.
+ * Opening the folder is done from the project header ("Open Folder" and
+ * "Open in VS Code"), which calls the backend endpoints that launch File
+ * Explorer or VS Code on this machine. This card stays read-only: it reports
+ * what is true of the folder before the user tries, and lets them copy the
+ * path.
  */
 function WorkspaceCard() {
   const { project } = useProject();
@@ -66,7 +64,7 @@ function WorkspaceCard() {
       </dl>
       {present ? (
         <div className="tiny dim" style={{ marginTop: 10 }}>
-          Open the folder in your file manager or editor. Project Hub cannot launch it from the browser.
+          Use “Open Folder” or “Open in VS Code” in the project header to open this folder on your machine.
         </div>
       ) : null}
       {data?.problems?.length ? (

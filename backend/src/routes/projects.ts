@@ -40,6 +40,7 @@ import {
   writeStatusDocument
 } from '../lib/projectStatus.js';
 import { probeProjectsRoot, type PathProblem } from '../lib/paths.js';
+import { launchExplorer, launchVSCode, prepareLocalOpen } from '../lib/openLocal.js';
 import { STAGES } from '../resources.js';
 
 const router = Router();
@@ -359,11 +360,10 @@ function workspaceProblems(problems: PathProblem[]): PathProblem[] {
 /**
  * Report whether a project's workspace folder is still on disk.
  *
- * A browser page cannot open a local folder in the operating system's file
- * manager - there is no standard API for it, and the File System Access API is
- * permission-gated and not universally available. Rather than ship a button
- * that silently does nothing, the details page uses this to tell the truth about
- * the workspace and lets the user copy the path.
+ * Opening the folder in the OS file manager is a separate, explicit action
+ * (`POST /:key/open-folder` below) because the browser cannot do it on its
+ * own. This read-only endpoint stays for the Workspace card, which uses it to
+ * show whether the folder still exists before the user tries to open it.
  */
 router.get('/:key/workspace', async (req, res, next) => {
   try {
@@ -384,6 +384,55 @@ router.get('/:key/workspace', async (req, res, next) => {
         checkedAt: probe.checkedAt
       }
     });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// --------------------------------------------------------------------------
+// Open the workspace locally (File Explorer / VS Code)
+//
+// The only client input is the project id. The folder that gets launched is
+// re-derived from the database record, proven to be inside the Projects Root,
+// and checked on disk before anything is spawned - see lib/openLocal.ts.
+// --------------------------------------------------------------------------
+
+/**
+ * Open this project's workspace folder in Windows File Explorer.
+ *
+ * The launcher is detached, so this returns as soon as Explorer has accepted
+ * the request; it does not wait for the window (and never treats explorer's
+ * habitual exit code 1 as a failure). A project without a usable folder gets a
+ * clear refusal instead of a silent fallback to the Projects Root.
+ */
+router.post('/:key/open-folder', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const folderPath = await prepareLocalOpen(project, 'explorer');
+    await launchExplorer(folderPath);
+    console.log(`[open-local] opened explorer for project ${project.id} at ${folderPath}`);
+    res.json({ data: { opened: true, application: 'explorer', folderPath, folderName: project.folderName } });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Open this project's workspace folder in Visual Studio Code.
+ *
+ * VS Code is located on disk (standard install locations, then the `code`
+ * PATH shim); if it cannot be found the response explains how to fix the
+ * installation instead of crashing. Project Hub never installs or repairs VS
+ * Code, never touches workspace settings, and only ever passes the folder path
+ * as an argument - it never runs terminals or scripts inside the project.
+ */
+router.post('/:key/open-vscode', async (req, res, next) => {
+  try {
+    const project = await resolveProject(req.params.key);
+    const folderPath = await prepareLocalOpen(project, 'vscode');
+    await launchVSCode(folderPath);
+    console.log(`[open-local] opened vscode for project ${project.id} at ${folderPath}`);
+    res.json({ data: { opened: true, application: 'vscode', folderPath, folderName: project.folderName } });
   } catch (e) {
     next(e);
   }

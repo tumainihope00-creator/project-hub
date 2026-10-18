@@ -177,6 +177,9 @@ Base URL: `http://localhost:4000/api`
 | GET    | `/projects`                           | Portfolio list (`?archived=active\|only\|all`, `?q=`, `?stage=`, `?tag=`) |
 | POST   | `/projects`                           | Create project (captures `originalIdea`) |
 | GET    | `/projects/:key`                      | Get by id or slug                        |
+| GET    | `/projects/:key/workspace`            | Workspace folder status on disk          |
+| POST   | `/projects/:key/open-folder`          | Open the workspace in File Explorer     |
+| POST   | `/projects/:key/open-vscode`          | Open the workspace in VS Code           |
 | PUT    | `/projects/:id`                       | Update project                           |
 | DELETE | `/projects/:id`                       | Archive (`?hard=true` to delete)         |
 | POST   | `/projects/:id/stage`                 | Change stage (`{ stage, note? }`)        |
@@ -256,6 +259,10 @@ AI Workspace, Bugs, Testing, Deployments, Production, Documentation, Notes, Acti
 Settings.
 
 A global quick-add palette and keyboard shortcuts are available from the layout.
+
+Every project page also has **Open Folder** and **Open in VS Code** buttons in
+the header action bar (next to the stage selector) — see *Opening the workspace
+locally* below.
 
 The **Project File** card on the Overview tab holds the document and its
 synchronization controls: **Check**, **Preview**, **Synchronize**, and **Regenerate**.
@@ -501,6 +508,25 @@ the prompt, the context, the response and the usage as they were at the time.
 
 ---
 
+## Opening the workspace locally
+
+The **Open Folder** and **Open in VS Code** buttons on every project page
+launch that project's actual workspace folder on your machine — File Explorer
+or Visual Studio Code (Windows only; other platforms get a clear error).
+
+The endpoints take only a project id. The backend re-derives the folder from
+the stored `folderPath`, proves it resolves inside the configured **Projects
+Root** and still exists on disk, then spawns the application with
+`shell: false` and a detached process, so the server never blocks on the
+window. A project with no folder, a missing folder, or a path outside the
+root gets an honest error with guidance — Project Hub never recreates a
+missing folder and never falls back to the parent directory. VS Code is found
+via its standard install locations or the `code` PATH shim; if it cannot be
+found, the response explains how to fix the installation, and nothing is
+installed or modified automatically.
+
+---
+
 ## Testing
 
 ```bash
@@ -549,6 +575,15 @@ normalized, that oversized responses are capped, and that interactions are saved
 only explicitly with exact snapshots — plus the usual environment and settings
 snapshot/restore and database fingerprint.
 
+`backend/tests/openLocal.test.ts` covers the **Open Folder / Open in VS Code**
+endpoints: trusted folder resolution for real created projects (each project
+resolves to its own distinct stored folder), refusal of projects without a
+configured folder, paths outside the Projects Root, and folders deleted from
+disk (which are never recreated), plus 404s for unknown ids and slug-key
+handling. The launchers themselves are deliberately not invoked by tests, so a
+test run never opens real windows on the machine; the success path is verified
+manually against live projects.
+
 ---
 
 ## Status
@@ -556,11 +591,14 @@ snapshot/restore and database fingerprint.
 Implemented phases: foundation, project management, knowledge, AI development, delivery,
 history/portability, PROJECT.md ↔ database synchronization, change-aware PROJECT.md
 monitoring and synchronization, AI prompt management (library, versioning, PROJECT.md
-section, context builder and offline prompt generator), and AI provider integration with
-the AI workspace — including tests and production builds for both apps.
+section, context builder and offline prompt generator), AI provider integration with
+the AI workspace, and local workspace launch (Open Folder / Open in VS Code) —
+including tests and production builds for both apps.
 
 ### Known limitations / future work
 
 - No authentication or multi-user support (V1 is local, single-user).
 - No real-time updates (the UI refreshes on write events).
 - Global search covers core entities; per-resource search is available on each list page.
+- Opening the workspace locally (Open Folder / Open in VS Code) is Windows-only, and
+  VS Code is currently the only editor target.

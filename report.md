@@ -3433,3 +3433,157 @@ at the end of the Phase 8 report that Phase 9 did not cover are folded in:
 Safety posture for Phase 10 is unchanged: additive migrations only, no
 destructive DB operations, fingerprint before/after, `__TEST__` fixtures
 only, and the API key stays server-side.
+
+---
+
+# IMPLEMENTATION REPORT - OPEN FOLDER & OPEN IN VS CODE (LOCAL WORKSPACE LAUNCH)
+
+Delivers the core of the planned Phase 13 (safe local editor/IDE launch) as
+two concrete actions on every individual project page: open the project's
+workspace folder in Windows File Explorer, or open it in Visual Studio Code.
+This is the first code in the codebase that spawns a process.
+
+## 1. FILES CHANGED
+
+- `backend/src/lib/openLocal.ts` (new) - trusted folder resolution plus the
+  Explorer and VS Code launchers (`child_process.spawn`, `shell: false`).
+- `backend/src/routes/projects.ts` - two new endpoints next to the existing
+  `GET /:key/workspace`: `POST /:key/open-folder` and `POST /:key/open-vscode`.
+- `backend/tests/openLocal.test.ts` (new) - 10 tests covering resolution and
+  every refusal path.
+- `frontend/src/pages/ProjectLayout.tsx` - the two header buttons, busy state,
+  duplicate-click guard, success/error toasts.
+- `frontend/src/pages/ProjectOverview.tsx` - the Workspace card's outdated
+  "Project Hub cannot launch it from the browser" copy now points at the
+  header actions.
+
+No migration. No schema change. No new dependency.
+
+## 2. HOW THE FOLDER IS RESOLVED
+
+The client sends only a project id (or slug). The backend re-reads the
+project row and uses the stored `folderPath` - never a path derived from the
+project name, never anything from the request body (both endpoints take an
+empty/ignored body). Before anything is launched, `resolveProjectFolderForOpening`
+proves, in order:
+
+1. the project has a `folderPath` at all (otherwise 422 `DATA_MISSING` with
+   guidance);
+2. a Projects Root is configured;
+3. the resolved path is genuinely inside the Projects Root (`isInsideRoot`,
+   the Phase 3 segment-comparison guard - a string prefix is not enough);
+4. the path is not a symlink/junction and is a directory;
+5. the directory still exists on disk.
+
+A missing, moved or unsafe folder is a 409 with an honest message and a
+`possibleAction`; Project Hub never recreates a missing folder, never falls
+back to the Projects Root, and never modifies the project record.
+
+## 3. HOW THE APPLICATIONS ARE LAUNCHED
+
+Both launchers use `spawn(command, [folderPath], { shell: false, detached:
+true, stdio: 'ignore' })` followed by `unref()`: the HTTP response returns as
+soon as the process starts, the server never waits for the window, and no part
+of a folder path is ever concatenated into a shell string. The promise settles
+on the `spawn` event, not on exit - `explorer.exe` returns exit code 1 even on
+success, and VS Code hands the folder to a running instance and exits, so an
+exit code would report failure for a successful launch. A genuine start
+failure arrives as an `error` event (e.g. `ENOENT`) and becomes a structured
+API error.
+
+- **File Explorer:** `explorer.exe <folderPath>`, resolved from the system.
+- **Visual Studio Code:** `Code.exe` is located directly - the two standard
+  install locations (`%LOCALAPPDATA%\Programs\Microsoft VS Code` and
+  `%ProgramFiles%`), then the `Code.exe` sitting next to the `bin\code.cmd`
+  shim that `where.exe code` finds. Spawning `code.cmd` itself is impossible
+  with `shell: false` (Windows refuses .cmd without a shell, and routing
+  through `cmd.exe` would mean rebuilding a quoted command line from
+  user-owned path segments), and `Code.exe` accepts the same folder argument.
+  If nothing is found: a 409 with installation/PATH guidance. Project Hub
+  never installs, repairs or reconfigures VS Code, never touches workspace
+  settings, and only ever passes the folder path - never a command, terminal
+  or script.
+
+Windows is the only supported platform; any other `process.platform` gets a
+clear "not supported" error. Successes and refusals are logged with a single
+`[open-local]` line carrying the project id and the machine-readable reason.
+
+## 4. API CHANGES
+
+| Method | Path                            | Effect                                            |
+| ------ | ------------------------------- | ------------------------------------------------- |
+| POST   | `/projects/:key/open-folder`    | Open the workspace in File Explorer               |
+| POST   | `/projects/:key/open-vscode`    | Open the workspace in Visual Studio Code          |
+
+Both accept id or slug like the other project routes, require no body, and on
+success return `{ data: { opened: true, application, folderPath, folderName } }`.
+Failure codes: 404 unknown project, 422 no folder configured (`DATA_MISSING`),
+409 unsafe/missing folder, VS Code not found, or unsupported platform.
+
+## 5. UI CHANGES
+
+Every individual project page (`ProjectLayout`, so all tabs) gains two buttons
+in the top-right action bar, next to the stage selector: **Open Folder**
+(`FolderOpen` icon) and **Open in VS Code** (`Code` icon), each with a
+`title` tooltip and an `aria-label`. While a request is in flight both
+buttons are disabled and the active one reads "Opening…" (the handler also
+refuses re-entry), preventing double launches. Success shows a toast; failure
+shows the backend's own message plus its `possibleAction` - the UI never
+claims success the backend did not report. The buttons use the standard
+`.btn sm` classes, so all six themes apply; the action bar already wraps on
+narrow windows. A project with no folder keeps the buttons visible and gets
+the explanatory 422 message as an error toast when clicked.
+
+## 6. SECURITY
+
+- No endpoint accepts a filesystem path; the only input is the project key,
+  resolved against the database.
+- The launched path is re-derived server-side and must pass the Phase 3
+  `isInsideRoot` containment check against the configured Projects Root.
+- `spawn` with an argument array and `shell: false`; no string ever reaches a
+  shell, so a folder named `foo & del *` is just a folder name.
+- No arbitrary command execution surface: the only two executables ever
+  spawned are `explorer.exe` and a located `Code.exe`, each with exactly one
+  argument (the validated folder).
+- The endpoints refuse to run at all on non-Windows platforms.
+
+## 7. DATABASE SAFETY
+
+No migration, no schema change, no writes of any kind. The endpoints read the
+project row and nothing else; tests only mutate their own `__TEST__` rows via
+Prisma and hard-delete them afterwards.
+
+## 8. TESTS PERFORMED
+
+Automated (`backend/tests/openLocal.test.ts`, 10/10 pass): resolution returns
+the exact stored folder for a created project; two projects resolve to their
+own distinct folders; a folderless project is refused (`PROJECT_WORKSPACE_MISSING`);
+a path outside the Projects Root is refused (`PROJECT_WORKSPACE_UNSAFE`); a
+folder deleted from disk is refused (`PROJECT_WORKSPACE_GONE`) and is NOT
+recreated; unknown ids get 404 on both endpoints; the 422 and 409 responses
+carry the documented messages and `possibleAction`; slug keys work. The
+launchers themselves are deliberately not invoked by tests - a test run must
+not scatter real windows across the machine. Full backend suite: 353 passed,
+1 pre-existing unrelated failure (`projectWorkspace.test.ts` asserts every
+non-test row in the live database has a null `folderPath`, which a real user
+project no longer satisfies). Frontend `tsc -b && vite build`: clean.
+
+Live verification against real project records with the backend running:
+`POST /api/projects/4870/open-folder` opened Explorer at
+`C:\Users\ILGRIS\Desktop\projects\quantitative_trading`;
+`POST /api/projects/4872/open-vscode` launched VS Code at
+`...\projects\you`; unknown id returned 404; a real folderless project (id
+171) returned the documented 422. The server stayed responsive throughout.
+
+## 9. KNOWN LIMITATIONS
+
+- Launch success is confirmed by process start, not by window appearance
+  (VS Code legitimately hands off to an already-running instance).
+- VS Code installs reachable only through unusual shims (e.g. scoop) are not
+  auto-detected; the user gets the install-guidance error and can still use
+  Open Folder.
+- The multi-editor picker and `Project.editorPreference` from the full
+  Phase 13 sketch are not implemented; VS Code is the only editor target
+  today, and the allowlist in `openLocal.ts` is where a second one is added.
+- `GET /api/ide` (editor detection reporting) does not exist; detection is
+  done per request at launch time.
