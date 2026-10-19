@@ -2,7 +2,16 @@
   "name": "project-hub",
   "version": "2.0.0",
   "private": true,
-  "description": "Project Hub 2.0 - Personal project lifecycle & AI development management system",
+  "description": "Project Hub — Capture. Build. Ship. A personal project lifecycle & AI development management system",
+  "author": {
+    "name": "Tumaini Kimtai",
+    "url": "https://github.com/tumainihope00-creator"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tumainihope00-creator/project-hub.git"
+  },
+  "homepage": "https://github.com/tumainihope00-creator/project-hub",
   "scripts": {
     "setup": "npm --prefix backend install && npm --prefix frontend install",
     "db:migrate": "npm --prefix backend run db:migrate",

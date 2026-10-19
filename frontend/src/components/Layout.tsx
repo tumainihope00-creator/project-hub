@@ -13,11 +13,14 @@ import {
   FileText,
   Folder,
   FolderKanban,
+  Info,
   LayoutDashboard,
   Maximize2,
   Menu,
   Microscope,
   Minimize2,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Rocket,
   Scale,
@@ -37,6 +40,9 @@ import { useApi, useDebounced } from '../lib/useApi';
 import { currentTheme, THEMES, applyTheme } from '../lib/theme';
 import type { NextAction } from '../api/types';
 import { GROUP_LABELS } from '../pages/SearchPage';
+import { APP_INFO } from '../appInfo';
+import { AboutDialog } from './AboutDialog';
+import { Logo } from './Logo';
 import { QuickAdd } from './QuickAdd';
 
 interface SuggestItem {
@@ -66,6 +72,8 @@ const GROUP_ICON: Record<string, React.ElementType> = {
 
 const MAX_SUGGESTIONS = 9;
 
+const SIDEBAR_KEY = 'phub.sidebar.collapsed';
+
 export function Layout() {
   const { projects, tags, reloadProjects, reloadTags, openQuickAdd } = useApp();
   const navigate = useNavigate();
@@ -74,6 +82,26 @@ export function Layout() {
   const [q, setQ] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleCollapsed = () => {
+    setCollapsed(v => {
+      const next = !v;
+      try {
+        localStorage.setItem(SIDEBAR_KEY, next ? '1' : '0');
+      } catch {
+        /* storage unavailable */
+      }
+      return next;
+    });
+  };
 
   // search suggestions
   const [suggestOpen, setSuggestOpen] = useState(false);
@@ -271,17 +299,25 @@ export function Layout() {
   );
 
   return (
-    <div className={'app' + (navOpen ? ' nav-open' : '')}>
+    <div className={'app' + (navOpen ? ' nav-open' : '') + (collapsed ? ' collapsed' : '')}>
       <div className="sidebar-backdrop" onClick={() => setNavOpen(false)} />
 
       <aside className="sidebar">
         <div className="sidebar-head">
-          <Link to="/" className="brand">
-            <span className="brand-mark">
-              <FolderKanban size={15} />
+          <Link to="/" className="brand" title={collapsed ? `${APP_INFO.name} — ${APP_INFO.tagline}` : undefined}>
+            <Logo size={26} className="brand-logo" />
+            <span className="brand-word">
+              {APP_INFO.name} <small>v{APP_INFO.versionShort}</small>
             </span>
-            Project Hub <small>2.0</small>
           </Link>
+          <button
+            className="sidebar-collapse"
+            onClick={toggleCollapsed}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+          </button>
         </div>
         <div className="sidebar-scroll">
           <div style={{ padding: '12px 16px 4px' }}>
@@ -289,25 +325,26 @@ export function Layout() {
               className="quickadd-btn"
               style={{ width: '100%', justifyContent: 'center' }}
               onClick={() => openQuickAdd()}
+              title="Quick Add (Q)"
             >
               <Plus size={15} />
-              Quick Add
+              <span className="qa-label">Quick Add</span>
               <span className="kbd">Q</span>
             </button>
           </div>
 
-          <NavLink to="/" end className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
+          <NavLink to="/" end className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')} title="Dashboard">
             <LayoutDashboard /> Dashboard
           </NavLink>
-          <NavLink to="/projects" end className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
+          <NavLink to="/projects" end className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')} title="Projects">
             <FolderKanban /> Projects
             <span className="count">{active.length}</span>
           </NavLink>
-          <NavLink to="/tags" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
+          <NavLink to="/tags" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')} title="Tags">
             <TagIcon /> Tags
             <span className="count">{tags.length}</span>
           </NavLink>
-          <NavLink to="/settings" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
+          <NavLink to="/settings" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')} title="Settings">
             <Settings /> Settings
           </NavLink>
 
@@ -318,7 +355,12 @@ export function Layout() {
             <div className="nav-item dim">No active projects</div>
           ) : (
             active.map(p => (
-              <NavLink key={p.id} to={`/projects/${p.slug}`} className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
+              <NavLink
+                key={p.id}
+                to={`/projects/${p.slug}`}
+                className={({ isActive }) => 'nav-item proj-item' + (isActive ? ' active' : '')}
+                title={p.name}
+              >
                 <span className="stage-dot" style={{ background: statusColor(p.stage) }} />
                 <span className="name">{p.name}</span>
               </NavLink>
@@ -336,27 +378,34 @@ export function Layout() {
               <div className="nav-item dim">None</div>
             ) : (
               archived.map(p => (
-                <NavLink key={p.id} to={`/projects/${p.slug}`} className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
+                <NavLink
+                  key={p.id}
+                  to={`/projects/${p.slug}`}
+                  className={({ isActive }) => 'nav-item proj-item' + (isActive ? ' active' : '')}
+                  title={p.name}
+                >
                   <span className="stage-dot" style={{ background: statusColor(p.stage) }} />
                   <span className="name">{p.name}</span>
                 </NavLink>
               ))
             ))}
 
-          <div className="nav-section">Tags</div>
-          <div style={{ padding: '2px 16px 8px' }}>
-            {tags.length === 0 ? (
-              <span className="dim tiny">No tags yet</span>
-            ) : (
-              <div className="tag-cloud">
-                {tags.slice(0, 18).map(t => (
-                  <Link key={t.id} className="tag" to={`/tags?tag=${encodeURIComponent(t.name)}`}>
-                    {t.name}
-                    <span className="n">{t.count}</span>
-                  </Link>
-                ))}
-              </div>
-            )}
+          <div className="sidebar-tags">
+            <div className="nav-section">Tags</div>
+            <div style={{ padding: '2px 16px 8px' }}>
+              {tags.length === 0 ? (
+                <span className="dim tiny">No tags yet</span>
+              ) : (
+                <div className="tag-cloud">
+                  {tags.slice(0, 18).map(t => (
+                    <Link key={t.id} className="tag" to={`/tags?tag=${encodeURIComponent(t.name)}`}>
+                      {t.name}
+                      <span className="n">{t.count}</span>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -454,6 +503,15 @@ export function Layout() {
 
           <button
             className="icon-btn"
+            onClick={() => setAboutOpen(true)}
+            aria-label={`About ${APP_INFO.name}`}
+            title={`About ${APP_INFO.name}`}
+          >
+            <Info />
+          </button>
+
+          <button
+            className="icon-btn"
             onClick={() => navigate('/settings')}
             aria-label="Settings"
             title="Settings"
@@ -520,6 +578,8 @@ export function Layout() {
       </div>
 
       {pop ? <button className="pop-dismiss" aria-label="Close menu" onClick={() => setPop(null)} /> : null}
+
+      {aboutOpen ? <AboutDialog onClose={() => setAboutOpen(false)} /> : null}
 
       <QuickAdd onCreated={() => {
         reloadProjects();

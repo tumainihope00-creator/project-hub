@@ -3,6 +3,9 @@ import { api, ApiError, formatDateTime } from '../api/client';
 import { useApi } from '../lib/useApi';
 import { useApp } from '../context/AppContext';
 import { ConfirmButton, ErrorBox, Loading } from '../components/ui';
+import { AboutDialog } from '../components/AboutDialog';
+import { Logo } from '../components/Logo';
+import { APP_INFO } from '../appInfo';
 import type { AiStatus, PathProblem, ProjectsRoot } from '../api/types';
 
 type Busy = 'save' | 'test' | 'init' | 'clear' | null;
@@ -238,7 +241,36 @@ export function SettingsPage() {
       ) : null}
 
       <AiSettingsCard />
+
+      <AboutSection />
     </div>
+  );
+}
+
+/** Product identity: version, attribution and the About dialog launcher. */
+function AboutSection() {
+  const [aboutOpen, setAboutOpen] = useState(false);
+  return (
+    <>
+      <h2 className="section">About</h2>
+      <div className="card">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+          <Logo size={40} />
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>
+              {APP_INFO.name} <span className="dim tiny">v{APP_INFO.version}</span>
+            </div>
+            <div className="muted" style={{ marginTop: 2 }}>
+              {APP_INFO.tagline} — created by {APP_INFO.creator.displayName}.
+            </div>
+          </div>
+          <button className="btn" onClick={() => setAboutOpen(true)}>
+            About {APP_INFO.name}
+          </button>
+        </div>
+        {aboutOpen ? <AboutDialog onClose={() => setAboutOpen(false)} /> : null}
+      </div>
+    </>
   );
 }
 

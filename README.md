@@ -1,8 +1,13 @@
-# Project Hub 2.0
+# Project Hub
 
-A personal **project lifecycle & AI/vibe-coding management system**. It answers one
-question for every project: *what actually happened, from idea to maintenance?* — without
-losing any of that history along the way.
+> **Capture. Build. Ship.**
+
+A personal **project lifecycle & AI/vibe-coding management system** and developer command
+center. It answers one question for every project: *what actually happened, from idea to
+maintenance?* — without losing any of that history along the way.
+
+**Created by [Tumaini Kimtai](https://github.com/tumainihope00-creator)** —
+repository: <https://github.com/tumainihope00-creator/project-hub>
 
 Unlike a task manager, Project Hub keeps the full story: the original idea, research,
 architecture decisions, requirements, features, tasks, AI prompts (and every version of
@@ -602,3 +607,49 @@ including tests and production builds for both apps.
 - Global search covers core entities; per-resource search is available on each list page.
 - Opening the workspace locally (Open Folder / Open in VS Code) is Windows-only, and
   VS Code is currently the only editor target.
+
+---
+
+## Product identity & About
+
+The product name, tagline, creator attribution, repository links, logo references and
+version are defined in one place: [`frontend/src/appInfo.ts`](frontend/src/appInfo.ts).
+The displayed version is injected at build time from `frontend/package.json` (see
+`frontend/vite.config.ts`), so the About dialog always reports the real package version.
+
+The in-app **About Project Hub** dialog (topbar info button, or **Settings → About**)
+shows the logo, tagline, version, creator attribution and third-party acknowledgements.
+Brand assets:
+
+| Asset                | Location                                  |
+| -------------------- | ----------------------------------------- |
+| Logo (vector)        | `frontend/public/logo.svg`                |
+| Favicon              | `frontend/public/favicon.svg`             |
+| In-app logo component | `frontend/src/components/Logo.tsx`       |
+| Windows icon (multi-size .ico) | `assets/project-hub.ico`       |
+
+The Windows icon can be regenerated from the logo geometry with
+`scripts\generate-icon.ps1`. Desktop packaging itself is not set up yet.
+
+---
+
+## Creator
+
+Project Hub is created and maintained by **Tumaini Kimtai**.
+
+- GitHub profile: <https://github.com/tumainihope00-creator>
+- Repository: <https://github.com/tumainihope00-creator/project-hub>
+
+---
+
+## License
+
+No software license has been declared for this repository yet (there is no `LICENSE`
+file and no `license` field in the package manifests). Until one is added, the source
+code is **not open source** and all rights are reserved by the creator.
+
+Project Hub depends on third-party open-source libraries (React, Vite, Express, Prisma,
+PostgreSQL, Recharts, lucide-react, Inter, and others — see `frontend/package.json` and
+`backend/package.json` for the full list). Each is licensed independently by its own
+authors; their licenses, names and trademarks remain the property of their respective
+owners. The About dialog lists the main acknowledgements.
